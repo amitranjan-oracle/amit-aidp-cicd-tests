@@ -1,7 +1,7 @@
 # AIDP CI/CD on push to `main` — Design Spec
 
 **Date:** 2026-06-07
-**Repo:** `amitranjan-oracle/aidp-tests` (public)
+**Repo:** `amitranjan-oracle/amit-aidp-cicd-tests` (public)
 **Status:** Approved design — pending final spec review before implementation plan.
 
 ## 1. Goal
@@ -64,7 +64,7 @@ All identifiers/config come from a YAML config file committed to the repo. The t
 
 **How a private box gets triggered (outbound-only):** the runner opens an **outbound** HTTPS long-poll to GitHub and waits ("Listening for Jobs"); on push, GitHub pushes the queued job **down that existing outbound connection**. GitHub never initiates an inbound connection, so no public IP / inbound `:22` / SSH-from-GitHub is needed — only egress (NAT), which `amit-cicd-compute` has.
 
-## 6. Components (files added to `aidp-tests`)
+## 6. Components (files added to `amit-aidp-cicd-tests`)
 
 | File | Responsibility |
 |---|---|
@@ -124,11 +124,11 @@ aidp:
   workspace_key: f95a83f8-9bd1-4259-a45f-ea1c3a5a7516   # playground
 
 git:
-  repository_url: https://github.com/amitranjan-oracle/aidp-tests.git
+  repository_url: https://github.com/amitranjan-oracle/amit-aidp-cicd-tests.git
   branch: main
   credential_key: "79476e30-b34c-4a1a-8fc5-9a202587f117"   # GIT_ACCOUNT "amitranjan-oracle" (PAT) — reference only
   parent_dir: /Workspace/cicd_folder
-  folder_path: /Workspace/cicd_folder/aidp-tests
+  folder_path: /Workspace/cicd_folder/amit-aidp-cicd-tests
 
 compute:
   name: ephemeral_01
@@ -216,20 +216,20 @@ Target **Python 3.9** (box interpreter). f-strings/`typing`/`dataclasses` fine; 
 
 - **Static:** `python3 -m py_compile aidp_cicd.py`.
 - **Dry run:** `aidp_cicd.py --config … --dry-run` — load+validate config & spec files, select+log signer, log the create/update/no-op decision + diff per resource; mutate nothing. Runnable off-box.
-- **Live (per project rule):** `workflow_dispatch` → runner picks up job → verify via AIDP MCP: `list_files /Workspace/cicd_folder/aidp-tests`; `ephemeral_01` matches spec; `cicd_workflow_job` has 2 sequential tasks on `ephemeral_01`. Re-run to prove idempotency: pull + **both reconciles report no-op**, no dupes.
+- **Live (per project rule):** `workflow_dispatch` → runner picks up job → verify via AIDP MCP: `list_files /Workspace/cicd_folder/amit-aidp-cicd-tests`; `ephemeral_01` matches spec; `cicd_workflow_job` has 2 sequential tasks on `ephemeral_01`. Re-run to prove idempotency: pull + **both reconciles report no-op**, no dupes.
 
 ## 13. Self-hosted runner setup (`docs/self-hosted-runner-setup.md`)
 
 1. Reach the box via bastion (`ssh -J opc@144.25.95.237 opc@10.0.1.84`).
 2. Principal sanity check: build `InstancePrincipalsSecurityTokenSigner()` + a read-only AIDP `GET`.
-3. Install runner (linux-x64): `./config.sh --url https://github.com/amitranjan-oracle/aidp-tests --token <REG_TOKEN> --labels self-hosted,aidp --unattended`.
+3. Install runner (linux-x64): `./config.sh --url https://github.com/amitranjan-oracle/amit-aidp-cicd-tests --token <REG_TOKEN> --labels self-hosted,aidp --unattended`.
 4. Service: `sudo ./svc.sh install opc && sudo ./svc.sh start` → "Listening for Jobs".
 5. Public-repo safety: trigger only on `push`/`workflow_dispatch` on `main` (never `pull_request` from forks); least-privilege IAM on the box's principal.
 
 ## 14. Open items to confirm at spec review
 
 1. Workspace = `playground` (`f95a83f8…`). ✅?
-2. Git folder path = `/Workspace/cicd_folder/aidp-tests`; spec files under `specs/`. ✅?
+2. Git folder path = `/Workspace/cicd_folder/amit-aidp-cicd-tests`; spec files under `specs/`. ✅?
 3. Runner labels `self-hosted, aidp` + service install. ✅?
 
 ## 15. Out of scope (YAGNI)

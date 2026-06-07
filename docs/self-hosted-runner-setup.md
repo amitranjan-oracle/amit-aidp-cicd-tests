@@ -34,13 +34,13 @@ access to `ai-data-platform-family` before continuing.
 
 Get a registration token: GitHub repo → **Settings → Actions → Runners → New
 self-hosted runner** (Linux x64), or
-`gh api -X POST repos/amitranjan-oracle/aidp-tests/actions/runners/registration-token`.
+`gh api -X POST repos/amitranjan-oracle/amit-aidp-cicd-tests/actions/runners/registration-token`.
 
 ```bash
 mkdir -p ~/actions-runner && cd ~/actions-runner
 curl -o runner.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64.tar.gz
 tar xzf runner.tar.gz
-./config.sh --url https://github.com/amitranjan-oracle/aidp-tests \
+./config.sh --url https://github.com/amitranjan-oracle/amit-aidp-cicd-tests \
             --token <REG_TOKEN> --labels self-hosted,aidp --unattended
 ```
 

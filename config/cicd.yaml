@@ -6,11 +6,11 @@ aidp:
   workspace_key: f95a83f8-9bd1-4259-a45f-ea1c3a5a7516   # playground
 
 git:
-  repository_url: https://github.com/amitranjan-oracle/aidp-tests.git
+  repository_url: https://github.com/amitranjan-oracle/amit-aidp-cicd-tests.git
   branch: main
   credential_key: "79476e30-b34c-4a1a-8fc5-9a202587f117"   # GIT_ACCOUNT "amitranjan-oracle" — reference only
   parent_dir: /Workspace/cicd_folder
-  folder_path: /Workspace/cicd_folder/aidp-tests
+  folder_path: /Workspace/cicd_folder/amit-aidp-cicd-tests
 
 compute:
   name: ephemeral_01
