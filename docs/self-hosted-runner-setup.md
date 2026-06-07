@@ -144,8 +144,11 @@ reconciles the `ephemeral_01` cluster + `cicd_workflow_job` job.
 ## As-built record (2026-06-07)
 
 - Runner **v2.334.0** registered on `amit-cicd-compute` as `amit-cicd-compute`
-  with labels `self-hosted,aidp`; running via **Option A (`nohup`)** —
-  "Listening for Jobs" confirmed. Durability (Option B) is a follow-up.
+  with labels `self-hosted,aidp`. Initially run via `nohup` from `~`, then
+  **moved to `/opt/actions-runner` and installed as a durable systemd service
+  (Option B)** — `systemctl` shows `active (running)` + "Listening for Jobs",
+  survives reboot. (The `/home` SELinux `203/EXEC` issue does not occur under
+  `/opt`.) The old `~/actions-runner` was removed.
 - Instance-owned Git credential `cicd-instance-principal`
   (`89e86bb7-5392-4a8c-a5ec-924c87546378`) created per §1b; `config/cicd.yaml`
   references it. Clone + pull verified SUCCEEDED under the instance principal.
