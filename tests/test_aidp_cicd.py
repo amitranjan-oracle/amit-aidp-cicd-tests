@@ -77,5 +77,38 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(aidp_cicd.load_spec(path)["displayName"], "ephemeral_01")
 
 
+class TestSubsetDiff(unittest.TestCase):
+    def test_satisfies_scalar_and_nested(self):
+        desired = {"a": 1, "b": {"c": 2}}
+        live = {"a": 1, "b": {"c": 2, "extra": 9}, "server": "x"}
+        self.assertTrue(aidp_cicd.satisfies(desired, live))   # extras ignored
+
+    def test_satisfies_detects_change(self):
+        self.assertFalse(aidp_cicd.satisfies({"a": 1}, {"a": 2}))
+        self.assertFalse(aidp_cicd.satisfies({"a": 1}, {}))           # missing key
+
+    def test_satisfies_lists_elementwise_subset(self):
+        desired = {"t": [{"k": "x"}]}
+        live = {"t": [{"k": "x", "extra": 1}]}
+        self.assertTrue(aidp_cicd.satisfies(desired, live))
+        self.assertFalse(aidp_cicd.satisfies({"t": [{"k": "x"}]}, {"t": []}))
+
+    def test_cluster_satisfied_ignores_volatile(self):
+        desired = {"displayName": "ephemeral_01",
+                   "driverConfig": {"driverShape": "amd.generic"}}
+        live = {"displayName": "ephemeral_01", "key": "abc", "state": "ACTIVE",
+                "driverConfig": {"driverShape": "amd.generic", "driverNodeType": None},
+                "jdbcEndpointUrl": "jdbc:..."}
+        self.assertTrue(aidp_cicd.cluster_in_sync(desired, live))
+
+    def test_job_compares_cluster_by_name_not_key(self):
+        desired = {"name": "cicd_workflow_job",
+                   "jobClusters": [{"clusterName": "ephemeral_01"}]}
+        live = {"name": "cicd_workflow_job", "key": "j1",
+                "jobClusters": [{"clusterName": "ephemeral_01",
+                                 "clusterKey": "a3ad", "newCluster": None}]}
+        self.assertTrue(aidp_cicd.job_in_sync(desired, live))
+
+
 if __name__ == "__main__":
     unittest.main()

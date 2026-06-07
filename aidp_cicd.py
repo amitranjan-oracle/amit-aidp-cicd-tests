@@ -55,3 +55,42 @@ def load_spec(path: str) -> Dict[str, Any]:
             return json.load(f)
         except json.JSONDecodeError as exc:
             raise ValueError("Invalid JSON in spec {}: {}".format(path, exc)) from exc
+
+
+def satisfies(desired: Any, live: Any) -> bool:
+    """True if every value declared in `desired` is present/equal in `live`.
+
+    Extra keys in `live` are ignored (declarative subset semantics), so
+    server-defaulted fields never trigger a false 'differs'.
+    """
+    if isinstance(desired, dict):
+        if not isinstance(live, dict):
+            return False
+        return all(k in live and satisfies(v, live[k]) for k, v in desired.items())
+    if isinstance(desired, list):
+        if not isinstance(live, list) or len(desired) != len(live):
+            return False
+        return all(satisfies(d, l) for d, l in zip(desired, live))
+    return desired == live
+
+
+def _strip_cluster_keys(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-copy a job and drop volatile clusterKey from all cluster refs."""
+    j = json.loads(json.dumps(job))
+    for jc in (j.get("jobClusters") or []):
+        jc.pop("clusterKey", None)
+    for t in (j.get("tasks") or []):
+        c = t.get("cluster")
+        if isinstance(c, dict):
+            c.pop("clusterKey", None)
+    return j
+
+
+def cluster_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
+    """Cluster reconcile check — pure subset (volatile fields aren't in desired)."""
+    return satisfies(desired, live)
+
+
+def job_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
+    """Job reconcile check — compare with clusterKey stripped (match by name)."""
+    return satisfies(_strip_cluster_keys(desired), _strip_cluster_keys(live))
