@@ -335,15 +335,17 @@ def phase3_compute(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     if client.offline:
         log.info("[offline dry-run] validated spec for cluster %s; skipping live check",
                  cfg["compute"]["name"]); return
-    live = client.find_cluster_by_name(cfg["compute"]["name"])
-    if live is None:
+    found = client.find_cluster_by_name(cfg["compute"]["name"])
+    if found is None:
         log.info("cluster %s absent -> CREATE", cfg["compute"]["name"])
         client.create_cluster(desired)
-    elif cluster_in_sync(desired, live):
+        return
+    live = client.get_cluster(found["key"])  # full repr — the list view summarizes config
+    if cluster_in_sync(desired, live):
         log.info("cluster %s already in sync -> NO-OP", cfg["compute"]["name"])
     else:
         log.info("cluster %s differs -> UPDATE", cfg["compute"]["name"])
-        client.update_cluster(live["key"], {**live, **desired})
+        client.update_cluster(found["key"], {**live, **desired})
 
 
 def phase4_job(client: "AidpClient", cfg: Dict[str, Any]) -> None:
@@ -358,16 +360,17 @@ def phase4_job(client: "AidpClient", cfg: Dict[str, Any]) -> None:
         raise RuntimeError("cluster {} not found; Phase 3 must create it first".format(
             w["cluster_name"]))
     desired_keyed = inject_cluster_key(desired, cluster["key"])
-    live = client.find_job_by_name(w["name"])
-    if live is None:
+    found = client.find_job_by_name(w["name"])
+    if found is None:
         log.info("job %s absent -> CREATE", w["name"])
         client.create_job(desired_keyed)
-    elif job_in_sync(desired, live):
+        return
+    current = client.get_job(found["key"])  # full repr for an accurate diff
+    if job_in_sync(desired, current):
         log.info("job %s already in sync -> NO-OP", w["name"])
     else:
         log.info("job %s differs -> UPDATE", w["name"])
-        current = client.get_job(live["key"])
-        client.update_job(live["key"], {**current, **desired_keyed})
+        client.update_job(found["key"], {**current, **desired_keyed})
 
 
 def _build_signer_with_timeout(timeout_secs: float):
