@@ -40,7 +40,8 @@ def load_config(path: str) -> Dict[str, Any]:
     missing = []
     for section, key in REQUIRED_CONFIG_KEYS:
         sec = cfg.get(section)
-        if not isinstance(sec, dict) or sec.get(key) in (None, ""):
+        val = sec.get(key) if isinstance(sec, dict) else None
+        if val is None or (isinstance(val, str) and not val.strip()):
             missing.append("{}.{}".format(section, key))
     if missing:
         raise ValueError("Missing required config keys: " + ", ".join(missing))
@@ -50,4 +51,7 @@ def load_config(path: str) -> Dict[str, Any]:
 def load_spec(path: str) -> Dict[str, Any]:
     """Load a JSON desired-state spec file."""
     with open(path) as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Invalid JSON in spec {}: {}".format(path, exc)) from exc
