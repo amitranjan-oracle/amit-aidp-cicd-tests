@@ -276,10 +276,11 @@ class AidpClient:
             log.info("[dry-run] create cluster %s", spec.get("displayName")); return {}
         return self.request_ok("POST", self.ws_url("clusters"), body=spec).json()
 
-    def update_cluster(self, key: str, body: Dict[str, Any]) -> Any:
+    def update_cluster(self, key: str, body: Dict[str, Any]) -> None:
         if self.dry_run:
-            log.info("[dry-run] update cluster %s", key); return {}
-        return self.request_ok("PUT", self.ws_url("clusters", key), body=body)
+            log.info("[dry-run] update cluster %s", key); return
+        self.request_ok("PUT", self.ws_url("clusters", key), body=body)
+        log.info("updated cluster %s", key)
 
     # ---- Phase 4: jobs ----
     def list_jobs(self) -> List[Dict[str, Any]]:
@@ -300,7 +301,8 @@ class AidpClient:
             log.info("[dry-run] create job %s", spec.get("name")); return {}
         return self.request_ok("POST", self.ws_url("jobs"), body=spec).json()
 
-    def update_job(self, key: str, body: Dict[str, Any]) -> Any:
+    def update_job(self, key: str, body: Dict[str, Any]) -> None:
         if self.dry_run:
-            log.info("[dry-run] update job %s", key); return {}
-        return self.request_ok("PUT", self.ws_url("jobs", key), body=body)
+            log.info("[dry-run] update job %s", key); return
+        self.request_ok("PUT", self.ws_url("jobs", key), body=body)
+        log.info("updated job %s", key)
