@@ -105,6 +105,7 @@ def job_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
     """Job reconcile check — clusterKey stripped (match by name), order-independent."""
     d = _sort_job_lists(_strip_cluster_keys(desired))
     l = _sort_job_lists(_strip_cluster_keys(live))
+    d.pop("path", None)  # server normalizes path inconsistently (create vs update) — not a real diff
     return satisfies(d, l)
 
 
@@ -145,6 +146,24 @@ def build_signer():
             "No OCI principal available (no resource-principal env and "
             "instance-principal init failed: {}). Run this on the OCI box.".format(exc)
         )
+
+
+def _async_key(resp) -> Optional[str]:
+    """Extract an AIDP async-operation key from a response's headers, if present."""
+    return (resp.headers.get("datalake-async-operation-key")
+            or resp.headers.get("aidp-async-operation-key"))
+
+
+def _ws_relpath(path: str) -> str:
+    """Workspace-root-relative path for the gitFolders API ("must be relative").
+
+    `/Workspace/cicd_folder/aidp-tests` -> `cicd_folder/aidp-tests`.
+    (mkdir / gitFolderMetadata accept the absolute form; gitFolders create/pull do not.)
+    """
+    p = path.lstrip("/")
+    if p.startswith("Workspace/"):
+        p = p[len("Workspace/"):]
+    return p
 
 
 class AidpClient:
@@ -215,29 +234,32 @@ class AidpClient:
 
     # ---- Phase 2: git folder ----
     def git_folder_metadata(self, folder_path: str) -> Dict[str, Any]:
+        # Must use the workspace-relative path — the absolute form never matches.
         resp = self.request_ok("GET", self.ws_url("gitFolderMetadata"),
-                               params={"folderPath": folder_path,
+                               params={"folderPath": _ws_relpath(folder_path),
                                        "resourceType": "FOLDER"})
         return resp.json()
 
-    def create_git_folder(self, folder_path, repo_url, branch, credential_key) -> None:
+    def create_git_folder(self, folder_path, repo_url, branch, credential_key) -> Optional[str]:
         if self.dry_run:
             log.info("[dry-run] create git folder %s -> %s@%s", folder_path,
-                     repo_url, branch); return
-        self.request_ok("POST", self.ws_url("gitFolders"), body={
-            "folderPath": folder_path, "gitRepositoryUrl": repo_url,
+                     repo_url, branch); return None
+        resp = self.request_ok("POST", self.ws_url("gitFolders"), body={
+            "folderPath": _ws_relpath(folder_path), "gitRepositoryUrl": repo_url,
             "branchName": branch, "credentialKey": credential_key,
             "description": None, "gitProviderKey": None})
-        log.info("created git folder %s", folder_path)
+        log.info("created git folder %s (cloning async)", folder_path)
+        return _async_key(resp)
 
-    def git_pull(self, repo_key, folder_path) -> Optional[str]:
+    def git_pull(self, repo_key, folder_path, branch) -> Optional[str]:
         if self.dry_run:
-            log.info("[dry-run] git pull %s (repo %s)", folder_path, repo_key); return None
+            log.info("[dry-run] git pull %s (repo %s, branch %s)", folder_path,
+                     repo_key, branch); return None
         resp = self.request_ok("POST",
             self.ws_url("gitRepositories", repo_key, "actions", "pull"),
-            body={"gitFolderPath": folder_path, "pullAction": "PULL"})
-        return (resp.headers.get("datalake-async-operation-key")
-                or resp.headers.get("aidp-async-operation-key"))
+            body={"branchName": branch, "gitFolderPath": _ws_relpath(folder_path),
+                  "pullAction": "PULL"})
+        return _async_key(resp)
 
     def wait_for_async(self, async_key: str) -> None:
         if not async_key:
@@ -257,6 +279,12 @@ class AidpClient:
                     async_key, status, self.poll_timeout))
             time.sleep(self.poll_interval)
 
+    def _wait_if_async(self, resp) -> None:
+        """If a mutating response carries an async-operation key, poll it to completion."""
+        key = _async_key(resp)
+        if key:
+            self.wait_for_async(key)
+
     # ---- Phase 3: clusters ----
     def list_clusters(self) -> List[Dict[str, Any]]:
         data = self.request_ok("GET", self.ws_url("clusters")).json()
@@ -271,15 +299,17 @@ class AidpClient:
     def get_cluster(self, key: str) -> Dict[str, Any]:
         return self.request_ok("GET", self.ws_url("clusters", key)).json()
 
-    def create_cluster(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+    def create_cluster(self, spec: Dict[str, Any]) -> None:
         if self.dry_run:
-            log.info("[dry-run] create cluster %s", spec.get("displayName")); return {}
-        return self.request_ok("POST", self.ws_url("clusters"), body=spec).json()
+            log.info("[dry-run] create cluster %s", spec.get("displayName")); return
+        resp = self.request_ok("POST", self.ws_url("clusters"), body=spec)
+        self._wait_if_async(resp)
+        log.info("created cluster %s", spec.get("displayName"))
 
     def update_cluster(self, key: str, body: Dict[str, Any]) -> None:
         if self.dry_run:
             log.info("[dry-run] update cluster %s", key); return
-        self.request_ok("PUT", self.ws_url("clusters", key), body=body)
+        self._wait_if_async(self.request_ok("PUT", self.ws_url("clusters", key), body=body))
         log.info("updated cluster %s", key)
 
     # ---- Phase 4: jobs ----
@@ -296,15 +326,17 @@ class AidpClient:
     def get_job(self, key: str) -> Dict[str, Any]:
         return self.request_ok("GET", self.ws_url("jobs", key)).json()
 
-    def create_job(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+    def create_job(self, spec: Dict[str, Any]) -> None:
         if self.dry_run:
-            log.info("[dry-run] create job %s", spec.get("name")); return {}
-        return self.request_ok("POST", self.ws_url("jobs"), body=spec).json()
+            log.info("[dry-run] create job %s", spec.get("name")); return
+        resp = self.request_ok("POST", self.ws_url("jobs"), body=spec)
+        self._wait_if_async(resp)
+        log.info("created job %s", spec.get("name"))
 
     def update_job(self, key: str, body: Dict[str, Any]) -> None:
         if self.dry_run:
             log.info("[dry-run] update job %s", key); return
-        self.request_ok("PUT", self.ws_url("jobs", key), body=body)
+        self._wait_if_async(self.request_ok("PUT", self.ws_url("jobs", key), body=body))
         log.info("updated job %s", key)
 
 
@@ -322,11 +354,11 @@ def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     meta = client.git_folder_metadata(g["folder_path"])
     if meta.get("isAssociated") and meta.get("repoKey"):
         log.info("git folder exists; pulling %s", g["branch"])
-        client.wait_for_async(client.git_pull(meta["repoKey"], g["folder_path"]))
+        client.wait_for_async(client.git_pull(meta["repoKey"], g["folder_path"], g["branch"]))
     else:
         log.info("git folder absent; cloning")
-        client.create_git_folder(g["folder_path"], g["repository_url"],
-                                 g["branch"], g["credential_key"])
+        client.wait_for_async(client.create_git_folder(
+            g["folder_path"], g["repository_url"], g["branch"], g["credential_key"]))
 
 
 def phase3_compute(client: "AidpClient", cfg: Dict[str, Any]) -> None:
