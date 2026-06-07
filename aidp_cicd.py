@@ -118,3 +118,76 @@ def inject_cluster_key(job_spec: Dict[str, Any], cluster_key: str) -> Dict[str, 
         if isinstance(c, dict):
             c["clusterKey"] = cluster_key
     return j
+
+
+def build_signer():
+    """Auto-detect an OCI signer: resource principal env, else instance principal.
+
+    Both subclass requests.auth.AuthBase, so they plug into requests as auth=.
+    Raises RuntimeError with a clear message if neither is available.
+    """
+    import os
+    import oci
+    if os.environ.get("OCI_RESOURCE_PRINCIPAL_VERSION"):
+        log.info("Using resource-principal signer.")
+        return oci.auth.signers.get_resource_principals_signer()
+    try:
+        log.info("Using instance-principal signer.")
+        return oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+    except Exception as exc:  # not on OCI / IMDS unreachable
+        raise RuntimeError(
+            "No OCI principal available (no resource-principal env and "
+            "instance-principal init failed: {}). Run this on the OCI box.".format(exc)
+        )
+
+
+class AidpClient:
+    """Thin signed-HTTPS client for the AIDP data-plane."""
+
+    def __init__(self, cfg: Dict[str, Any], signer, dry_run: bool = False) -> None:
+        a = cfg["aidp"]
+        self.region = a["region"]
+        self.data_lake_id = a["data_lake_ocid"]
+        self.path_prefix = a["path_prefix"]
+        self.api_version = str(a["api_version"])
+        self.workspace_key = a["workspace_key"]
+        self.signer = signer
+        self.verify_tls = bool(cfg.get("options", {}).get("verify_tls", True))
+        self.poll_timeout = int(cfg.get("options", {}).get("poll_timeout_secs", 600))
+        self.poll_interval = int(cfg.get("options", {}).get("poll_interval_secs", 5))
+        self.dry_run = dry_run
+        self.offline = signer is None   # no principal -> validate-only (off-box dry-run)
+
+    # ---- URL helpers ----
+    def lake_url(self, *parts: str) -> str:
+        base = "https://aidp.{}.oci.oraclecloud.com/{}/{}/{}".format(
+            self.region, self.api_version, self.path_prefix, self.data_lake_id)
+        return "/".join([base] + [p.strip("/") for p in parts]) if parts else base
+
+    def ws_url(self, *parts: str) -> str:
+        return self.lake_url("workspaces", self.workspace_key, *parts)
+
+    # ---- signed request ----
+    def request(self, method: str, url: str, body: Optional[dict] = None,
+                params: Optional[dict] = None) -> requests.Response:
+        headers = {"accept": "application/json"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")  # exact bytes the signer hashes
+            headers["content-type"] = "application/json"
+        log.info("%s %s", method, url)
+        resp = requests.request(method, url, data=data, params=params,
+                                headers=headers, auth=self.signer,
+                                verify=self.verify_tls, timeout=60)
+        log.info("-> HTTP %s opc-request-id=%s", resp.status_code,
+                 resp.headers.get("opc-request-id"))
+        return resp
+
+    def request_ok(self, method: str, url: str, body=None, params=None,
+                   ok=(200, 201, 202, 204)) -> requests.Response:
+        resp = self.request(method, url, body=body, params=params)
+        if resp.status_code not in ok:
+            raise RuntimeError("{} {} -> HTTP {}: {} (opc-request-id={})".format(
+                method, url, resp.status_code, resp.text,
+                resp.headers.get("opc-request-id")))
+        return resp

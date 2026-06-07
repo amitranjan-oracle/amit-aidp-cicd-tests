@@ -135,5 +135,23 @@ class TestInjectClusterKey(unittest.TestCase):
         self.assertNotIn("clusterKey", job["jobClusters"][0])
 
 
+class TestUrlBuilding(unittest.TestCase):
+    def test_lake_and_ws_urls(self):
+        c = aidp_cicd.AidpClient.__new__(aidp_cicd.AidpClient)
+        c.region = "us-ashburn-1"
+        c.data_lake_id = "ocid1.datalake.x"
+        c.path_prefix = "dataLakes"
+        c.api_version = "20240831"
+        c.workspace_key = "ws-1"
+        self.assertEqual(
+            c.lake_url(),
+            "https://aidp.us-ashburn-1.oci.oraclecloud.com/20240831/dataLakes/ocid1.datalake.x",
+        )
+        self.assertEqual(
+            c.ws_url("clusters"),
+            "https://aidp.us-ashburn-1.oci.oraclecloud.com/20240831/dataLakes/ocid1.datalake.x/workspaces/ws-1/clusters",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
