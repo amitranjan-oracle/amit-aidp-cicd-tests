@@ -13,13 +13,13 @@ git:
   folder_path: /Workspace/cicd_folder/amit-aidp-cicd-tests
 
 compute:
-  name: ephemeral_01
-  spec_file: specs/ephemeral_01.cluster.json
+  name: cicd_01
+  spec_file: specs/cicd_01.cluster.json
 
 workflow:
   name: cicd_workflow_job
   spec_file: specs/cicd_workflow_job.job.json
-  cluster_name: ephemeral_01
+  cluster_name: cicd_01
 
 options:
   verify_tls: true

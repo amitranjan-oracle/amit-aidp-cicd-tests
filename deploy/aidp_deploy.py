@@ -2,7 +2,7 @@
 """AIDP CI/CD reconcile script.
 
 Runs on amit-cicd-compute (Python 3.9) under the box's instance principal.
-Reads config/cicd.yaml + specs/*.json and brings AIDP to desired state:
+Reads deploy/cicd.yaml + specs/*.json and brings AIDP to desired state:
   Phase 1  ensure /Workspace/cicd_folder
   Phase 2  git folder clone (create) or pull main
   Phase 3  reconcile compute cluster ephemeral_01
@@ -299,18 +299,48 @@ class AidpClient:
     def get_cluster(self, key: str) -> Dict[str, Any]:
         return self.request_ok("GET", self.ws_url("clusters", key)).json()
 
-    def create_cluster(self, spec: Dict[str, Any]) -> None:
+    def wait_for_cluster_active(self, key: str) -> Dict[str, Any]:
+        """Poll the cluster until it reports ACTIVE (create/restart provisioning
+        completes). Raise on FAILED, or TimeoutError past poll_timeout."""
+        deadline = time.time() + self.poll_timeout
+        while True:
+            c = self.get_cluster(key)
+            state = c.get("state") or c.get("lifecycleState")
+            log.info("cluster %s state=%s", key, state)
+            if state == "ACTIVE":
+                return c
+            if state == "FAILED":
+                raise RuntimeError("cluster {} entered FAILED: {}".format(
+                    key, c.get("stateDetails")))
+            if time.time() > deadline:
+                raise TimeoutError("cluster {} still {} after {}s".format(
+                    key, state, self.poll_timeout))
+            time.sleep(self.poll_interval)
+
+    def create_cluster(self, spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if self.dry_run:
-            log.info("[dry-run] create cluster %s", spec.get("displayName")); return
+            log.info("[dry-run] create cluster %s", spec.get("displayName")); return None
         resp = self.request_ok("POST", self.ws_url("clusters"), body=spec)
         self._wait_if_async(resp)
-        log.info("created cluster %s", spec.get("displayName"))
+        try:
+            created = resp.json()
+        except ValueError:
+            created = {}
+        key = created.get("key")
+        if not key:  # response didn't echo the key — resolve by name
+            found = self.find_cluster_by_name(spec.get("displayName"))
+            key = found.get("key") if found else None
+        log.info("created cluster %s (key=%s); waiting for ACTIVE", spec.get("displayName"), key)
+        if key:
+            self.wait_for_cluster_active(key)
+        return created
 
     def update_cluster(self, key: str, body: Dict[str, Any]) -> None:
         if self.dry_run:
             log.info("[dry-run] update cluster %s", key); return
         self._wait_if_async(self.request_ok("PUT", self.ws_url("clusters", key), body=body))
-        log.info("updated cluster %s", key)
+        log.info("updated cluster %s; waiting for ACTIVE", key)
+        self.wait_for_cluster_active(key)
 
     # ---- Phase 4: jobs ----
     def list_jobs(self) -> List[Dict[str, Any]]:
