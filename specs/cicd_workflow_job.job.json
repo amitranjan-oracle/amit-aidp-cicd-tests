@@ -1,0 +1,24 @@
+{
+  "name": "cicd_workflow_job",
+  "description": "",
+  "path": "jobs",
+  "maxConcurrentRuns": 1,
+  "parameters": [ { "name": "job_param", "value": "custom_value" } ],
+  "jobClusters": [ { "clusterName": "ephemeral_01", "newCluster": null } ],
+  "tasks": [
+    { "type": "NOTEBOOK_TASK", "taskKey": "set_parameter", "dependsOn": [],
+      "runIf": "ALL_SUCCESS", "maxRetries": 0,
+      "notebookPath": "/Workspace/Shared/default_examples/set_parameter.ipynb",
+      "cluster": { "clusterName": "ephemeral_01", "newCluster": null },
+      "parameters": [] },
+    { "type": "NOTEBOOK_TASK", "taskKey": "print_parameter",
+      "dependsOn": [ { "taskKey": "set_parameter", "outcome": null } ],
+      "runIf": "ALL_SUCCESS", "maxRetries": 0,
+      "notebookPath": "/Workspace/Shared/default_examples/print_parameter.ipynb",
+      "cluster": { "clusterName": "ephemeral_01", "newCluster": null },
+      "parameters": [
+        { "name": "job_param",  "value": "{{job.parameters.job_param}}" },
+        { "name": "task_param", "value": "{{job.parameters.job_param}}" }
+      ] }
+  ]
+}

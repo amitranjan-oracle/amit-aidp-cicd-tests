@@ -1,0 +1,28 @@
+{
+  "displayName": "ephemeral_01",
+  "description": null,
+  "type": "USER",
+  "nodeType": null,
+  "driverConfig": {
+    "driverShape": "amd.generic",
+    "driverShapeConfig": { "ocpus": 2, "gpus": 0, "memoryInGBs": 32 }
+  },
+  "workerConfig": {
+    "workerShape": "amd.generic",
+    "workerShapeConfig": { "ocpus": 2, "gpus": 0, "memoryInGBs": 32 },
+    "minWorkerCount": 1,
+    "maxWorkerCount": 1
+  },
+  "clusterRuntimeConfig": {
+    "type": "SPARK",
+    "initScripts": [],
+    "sparkVersion": "3.5.0",
+    "sparkAdvancedConfigurations": {
+      "spark.executor.extraJavaOptions": "-Dcom.amazonaws.services.s3.enableV4=true",
+      "spark.driver.extraJavaOptions": "-Dcom.amazonaws.services.s3.enableV4=true"
+    },
+    "sparkEnvVariables": {}
+  },
+  "autoTerminationMinutes": null,
+  "loggingConfig": null
+}
