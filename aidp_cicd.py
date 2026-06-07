@@ -127,7 +127,13 @@ def build_signer():
     Raises RuntimeError with a clear message if neither is available.
     """
     import os
-    import oci
+    try:
+        import oci
+    except ImportError as exc:
+        raise RuntimeError(
+            "oci SDK not importable ({}); run this on the OCI box where oci is "
+            "installed.".format(exc)
+        )
     if os.environ.get("OCI_RESOURCE_PRINCIPAL_VERSION"):
         log.info("Using resource-principal signer.")
         return oci.auth.signers.get_resource_principals_signer()
