@@ -109,6 +109,14 @@ class TestSubsetDiff(unittest.TestCase):
                                  "clusterKey": "a3ad", "newCluster": None}]}
         self.assertTrue(aidp_cicd.job_in_sync(desired, live))
 
+    def test_job_in_sync_is_order_independent(self):
+        desired = {"name": "j",
+                   "tasks": [{"taskKey": "set_parameter"}, {"taskKey": "print_parameter"}]}
+        live = {"name": "j", "key": "k",
+                "tasks": [{"taskKey": "print_parameter", "extra": 1},
+                          {"taskKey": "set_parameter", "extra": 2}]}
+        self.assertTrue(aidp_cicd.job_in_sync(desired, live))
+
 
 if __name__ == "__main__":
     unittest.main()

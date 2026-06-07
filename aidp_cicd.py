@@ -70,7 +70,7 @@ def satisfies(desired: Any, live: Any) -> bool:
     if isinstance(desired, list):
         if not isinstance(live, list) or len(desired) != len(live):
             return False
-        return all(satisfies(d, l) for d, l in zip(desired, live))
+        return all(satisfies(dv, lv) for dv, lv in zip(desired, live))
     return desired == live
 
 
@@ -86,11 +86,23 @@ def _strip_cluster_keys(job: Dict[str, Any]) -> Dict[str, Any]:
     return j
 
 
+def _sort_job_lists(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-copy a job and sort its tasks/jobClusters so comparison is order-independent."""
+    j = json.loads(json.dumps(job))
+    if isinstance(j.get("tasks"), list):
+        j["tasks"] = sorted(j["tasks"], key=lambda t: t.get("taskKey") or "")
+    if isinstance(j.get("jobClusters"), list):
+        j["jobClusters"] = sorted(j["jobClusters"], key=lambda c: c.get("clusterName") or "")
+    return j
+
+
 def cluster_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
     """Cluster reconcile check — pure subset (volatile fields aren't in desired)."""
     return satisfies(desired, live)
 
 
 def job_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
-    """Job reconcile check — compare with clusterKey stripped (match by name)."""
-    return satisfies(_strip_cluster_keys(desired), _strip_cluster_keys(live))
+    """Job reconcile check — clusterKey stripped (match by name), order-independent."""
+    d = _sort_job_lists(_strip_cluster_keys(desired))
+    l = _sort_job_lists(_strip_cluster_keys(live))
+    return satisfies(d, l)
