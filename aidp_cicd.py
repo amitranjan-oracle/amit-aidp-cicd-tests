@@ -106,3 +106,15 @@ def job_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
     d = _sort_job_lists(_strip_cluster_keys(desired))
     l = _sort_job_lists(_strip_cluster_keys(live))
     return satisfies(d, l)
+
+
+def inject_cluster_key(job_spec: Dict[str, Any], cluster_key: str) -> Dict[str, Any]:
+    """Return a deep copy of the job spec with clusterKey set on every cluster ref."""
+    j = json.loads(json.dumps(job_spec))
+    for jc in (j.get("jobClusters") or []):
+        jc["clusterKey"] = cluster_key
+    for t in (j.get("tasks") or []):
+        c = t.get("cluster")
+        if isinstance(c, dict):
+            c["clusterKey"] = cluster_key
+    return j

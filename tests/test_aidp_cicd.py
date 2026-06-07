@@ -118,5 +118,22 @@ class TestSubsetDiff(unittest.TestCase):
         self.assertTrue(aidp_cicd.job_in_sync(desired, live))
 
 
+class TestInjectClusterKey(unittest.TestCase):
+    def test_injects_into_jobclusters_and_tasks(self):
+        job = {
+            "jobClusters": [{"clusterName": "ephemeral_01", "newCluster": None}],
+            "tasks": [
+                {"taskKey": "a", "cluster": {"clusterName": "ephemeral_01"}},
+                {"taskKey": "b", "cluster": {"clusterName": "ephemeral_01"}},
+            ],
+        }
+        out = aidp_cicd.inject_cluster_key(job, "KEY-123")
+        self.assertEqual(out["jobClusters"][0]["clusterKey"], "KEY-123")
+        for t in out["tasks"]:
+            self.assertEqual(t["cluster"]["clusterKey"], "KEY-123")
+        # original untouched
+        self.assertNotIn("clusterKey", job["jobClusters"][0])
+
+
 if __name__ == "__main__":
     unittest.main()
