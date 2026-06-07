@@ -306,3 +306,131 @@ class AidpClient:
             log.info("[dry-run] update job %s", key); return
         self.request_ok("PUT", self.ws_url("jobs", key), body=body)
         log.info("updated job %s", key)
+
+
+def phase1_directory(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+    log.info("== Phase 1: ensure directory ==")
+    client.ensure_directory(cfg["git"]["parent_dir"])
+
+
+def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+    log.info("== Phase 2: git folder (create or pull) ==")
+    g = cfg["git"]
+    if client.offline:
+        log.info("[offline dry-run] would create-or-pull git folder %s (%s@%s)",
+                 g["folder_path"], g["repository_url"], g["branch"]); return
+    meta = client.git_folder_metadata(g["folder_path"])
+    if meta.get("isAssociated") and meta.get("repoKey"):
+        log.info("git folder exists; pulling %s", g["branch"])
+        client.wait_for_async(client.git_pull(meta["repoKey"], g["folder_path"]))
+    else:
+        log.info("git folder absent; cloning")
+        client.create_git_folder(g["folder_path"], g["repository_url"],
+                                 g["branch"], g["credential_key"])
+
+
+def phase3_compute(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+    log.info("== Phase 3: reconcile compute ==")
+    desired = load_spec(cfg["compute"]["spec_file"])
+    if client.offline:
+        log.info("[offline dry-run] validated spec for cluster %s; skipping live check",
+                 cfg["compute"]["name"]); return
+    live = client.find_cluster_by_name(cfg["compute"]["name"])
+    if live is None:
+        log.info("cluster %s absent -> CREATE", cfg["compute"]["name"])
+        client.create_cluster(desired)
+    elif cluster_in_sync(desired, live):
+        log.info("cluster %s already in sync -> NO-OP", cfg["compute"]["name"])
+    else:
+        log.info("cluster %s differs -> UPDATE", cfg["compute"]["name"])
+        client.update_cluster(live["key"], {**live, **desired})
+
+
+def phase4_job(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+    log.info("== Phase 4: reconcile job ==")
+    w = cfg["workflow"]
+    desired = load_spec(w["spec_file"])
+    if client.offline:
+        log.info("[offline dry-run] validated spec for job %s; skipping live check",
+                 w["name"]); return
+    cluster = client.find_cluster_by_name(w["cluster_name"])
+    if cluster is None:
+        raise RuntimeError("cluster {} not found; Phase 3 must create it first".format(
+            w["cluster_name"]))
+    desired_keyed = inject_cluster_key(desired, cluster["key"])
+    live = client.find_job_by_name(w["name"])
+    if live is None:
+        log.info("job %s absent -> CREATE", w["name"])
+        client.create_job(desired_keyed)
+    elif job_in_sync(desired, live):
+        log.info("job %s already in sync -> NO-OP", w["name"])
+    else:
+        log.info("job %s differs -> UPDATE", w["name"])
+        current = client.get_job(live["key"])
+        client.update_job(live["key"], {**current, **desired_keyed})
+
+
+def _build_signer_with_timeout(timeout_secs: float):
+    """Call build_signer() in a daemon thread; return (signer, None) on success
+    or (None, exc_str) if it raises or times out within *timeout_secs*."""
+    import threading
+    result: list = []
+
+    def _target():
+        try:
+            result.append(("ok", build_signer()))
+        except Exception as exc:  # noqa: BLE001
+            result.append(("err", str(exc)))
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout_secs)
+    if not result:
+        return None, "build_signer timed out after {}s (IMDS unreachable)".format(timeout_secs)
+    tag, val = result[0]
+    if tag == "ok":
+        return val, None
+    return None, val
+
+
+def run(cfg: Dict[str, Any], dry_run: bool) -> None:
+    # Always try for a signer. On-box (incl. dry-run) we get one and make real
+    # read-only decisions. Off-box dry-run tolerates no principal -> offline.
+    signer = None
+    try:
+        if dry_run:
+            # Cap the IMDS probe at 5 s so off-box dry-runs don't hang.
+            signer, err = _build_signer_with_timeout(5)
+            if signer is None:
+                raise RuntimeError(err)
+        else:
+            signer = build_signer()
+    except RuntimeError as exc:
+        if not dry_run:
+            raise
+        log.warning("No OCI principal (%s); offline dry-run: config/specs only.", exc)
+    client = AidpClient(cfg, signer, dry_run=dry_run)
+    phase1_directory(client, cfg)
+    phase2_git_folder(client, cfg)
+    phase3_compute(client, cfg)
+    phase4_job(client, cfg)
+    log.info("== Done ==")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="AIDP CI/CD reconcile")
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate + log intended actions; mutate nothing.")
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    cfg = load_config(args.config)
+    if args.dry_run:
+        log.info("DRY RUN — no mutations will be made.")
+    run(cfg, dry_run=args.dry_run)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
