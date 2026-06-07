@@ -61,38 +61,93 @@ instance principal now sees it: `GET {lake}/userSettings?settingType=GIT_ACCOUNT
 should list `cicd-instance-principal`. (Do **not** reuse a user-owned credential
 key — clone/pull will `InternalError`.)
 
-## 2. Install the runner
+## 2. Get a registration token (short-lived, ~1 h)
 
-Get a registration token: GitHub repo → **Settings → Actions → Runners → New
-self-hosted runner** (Linux x64), or
-`gh api -X POST repos/amitranjan-oracle/amit-aidp-cicd-tests/actions/runners/registration-token`.
+From a machine with `gh` authenticated as a repo admin (e.g. your laptop):
 
 ```bash
-mkdir -p ~/actions-runner && cd ~/actions-runner
-curl -o runner.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64.tar.gz
+# latest runner version
+gh api repos/actions/runner/releases/latest --jq .tag_name        # -> v2.334.0
+# registration token (single-use, expires ~1h)
+gh api --method POST \
+  repos/amitranjan-oracle/amit-aidp-cicd-tests/actions/runners/registration-token \
+  --jq .token
+```
+
+(UI equivalent: repo → **Settings → Actions → Runners → New self-hosted runner**.)
+
+## 3. Download, configure & register (run on the box, as `opc`)
+
+```bash
+cd ~ && mkdir -p actions-runner && cd actions-runner
+curl -fsSL -o runner.tar.gz \
+  https://github.com/actions/runner/releases/download/v2.334.0/actions-runner-linux-x64-2.334.0.tar.gz
 tar xzf runner.tar.gz
+sudo ./bin/installdependencies.sh            # OL9: pulls libicu etc.
 ./config.sh --url https://github.com/amitranjan-oracle/amit-aidp-cicd-tests \
-            --token <REG_TOKEN> --labels self-hosted,aidp --unattended
+            --token <REG_TOKEN> \
+            --labels self-hosted,aidp --name amit-cicd-compute --unattended --replace
 ```
 
-## 3. Run as a service (survives reboot)
+Expect `√ Runner successfully added`.
 
+## 4. Start the runner
+
+> ⚠️ **OL9 SELinux gotcha (as-built):** `sudo ./svc.sh install` registers a
+> systemd unit, but starting it **fails** with `203/EXEC … runsvc.sh: Permission
+> denied` — SELinux (enforcing) won't let **systemd** exec scripts under
+> `/home/opc`. Two ways forward:
+
+**Option A — run directly as `opc` (used now; NOT reboot-durable):**
 ```bash
-sudo ./svc.sh install opc
-sudo ./svc.sh start
-sudo ./svc.sh status   # expect "active (running)" and "Listening for Jobs"
+sudo ./svc.sh stop && sudo ./svc.sh uninstall   # remove the broken unit
+nohup ./run.sh > ~/actions-runner/runner.log 2>&1 &
+sleep 8 && tail -5 ~/actions-runner/runner.log   # expect "Listening for Jobs"
 ```
 
-## 4. Security (public repo)
+**Option B — durable systemd service (recommended for production):** install the
+runner **outside `/home`** so SELinux allows systemd to exec it, e.g.:
+```bash
+sudo mkdir -p /opt/actions-runner && sudo chown opc:opc /opt/actions-runner
+# extract + ./config.sh in /opt/actions-runner instead of ~, then:
+sudo ./svc.sh install opc && sudo ./svc.sh start && sudo ./svc.sh status
+```
+(Or keep it in `/home` and relabel: `sudo semanage fcontext -a -t bin_t '/home/opc/actions-runner/.*'` + `sudo restorecon -R ~/actions-runner` — moving to `/opt` is cleaner.)
+
+## 5. Security (public repo)
 
 - The workflow triggers only on `push`/`workflow_dispatch` on `main` — never
   `pull_request` from forks (which would run untrusted code on the runner).
 - The runner inherits the box's instance principal; keep the IAM policy on
   `DataServices-Compute-DG` least-privilege.
 
-## 5. First run
+## 6. Pushing the workflow file & triggering
 
-Push to `main` (or use **Actions → aidp-cicd → Run workflow**). The runner picks
-up the job and runs `python3 aidp_cicd.py --config config/cicd.yaml`, which
-ensures `/Workspace/cicd_folder`, clones/pulls the repo into the AIDP git folder,
-and reconciles the `ephemeral_01` cluster + `cicd_workflow_job` job.
+- **Pushing `.github/workflows/cicd.yml` over HTTPS needs a token with the
+  `workflow` scope.** A plain `gh` OAuth token is rejected (`refusing to allow a
+  Personal Access Token to … workflow … without workflow scope`). Either
+  `gh auth refresh -h github.com -s workflow`, or **push over SSH** (SSH keys are
+  exempt): `git remote set-url origin git@github.com:amitranjan-oracle/amit-aidp-cicd-tests.git`.
+- **`workflow_dispatch` only works once the workflow exists on the default
+  branch (`main`).** Dispatching on a feature branch returns
+  `HTTP 404: workflow … not found on the default branch`. So the first
+  GitHub-triggered run requires the workflow merged to `main` (then `push` to
+  `main` triggers it, or **Actions → aidp-cicd → Run workflow**).
+
+## 7. First run
+
+Once on `main`, a push (or manual dispatch) makes the runner run
+`python3 aidp_cicd.py --config config/cicd.yaml`, which ensures
+`/Workspace/cicd_folder`, clones/pulls the repo into the AIDP git folder, and
+reconciles the `ephemeral_01` cluster + `cicd_workflow_job` job.
+
+## As-built record (2026-06-07)
+
+- Runner **v2.334.0** registered on `amit-cicd-compute` as `amit-cicd-compute`
+  with labels `self-hosted,aidp`; running via **Option A (`nohup`)** —
+  "Listening for Jobs" confirmed. Durability (Option B) is a follow-up.
+- Instance-owned Git credential `cicd-instance-principal`
+  (`89e86bb7-5392-4a8c-a5ec-924c87546378`) created per §1b; `config/cicd.yaml`
+  references it. Clone + pull verified SUCCEEDED under the instance principal.
+- Branch pushed over **SSH** (workflow-scope limitation, §6). Draft PR #3 open;
+  GitHub-triggered run pending merge to `main`.
