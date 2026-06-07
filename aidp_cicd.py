@@ -197,3 +197,110 @@ class AidpClient:
                 method, url, resp.status_code, resp.text,
                 resp.headers.get("opc-request-id")))
         return resp
+
+    # ---- Phase 1: directory ----
+    def ensure_directory(self, path: str) -> None:
+        if self.dry_run:
+            log.info("[dry-run] mkdir %s", path); return
+        resp = self.request("POST", self.ws_url("actions", "mkdir"),
+                            body={"path": path, "description": None})
+        if resp.status_code in (200, 201, 204):
+            log.info("created directory %s", path)
+        elif resp.status_code == 409 or (resp.status_code == 400
+                and "exist" in (resp.text or "").lower()):
+            log.info("directory %s already exists", path)
+        else:
+            raise RuntimeError("mkdir {} -> HTTP {}: {}".format(
+                path, resp.status_code, resp.text))
+
+    # ---- Phase 2: git folder ----
+    def git_folder_metadata(self, folder_path: str) -> Dict[str, Any]:
+        resp = self.request_ok("GET", self.ws_url("gitFolderMetadata"),
+                               params={"folderPath": folder_path,
+                                       "resourceType": "FOLDER"})
+        return resp.json()
+
+    def create_git_folder(self, folder_path, repo_url, branch, credential_key) -> None:
+        if self.dry_run:
+            log.info("[dry-run] create git folder %s -> %s@%s", folder_path,
+                     repo_url, branch); return
+        self.request_ok("POST", self.ws_url("gitFolders"), body={
+            "folderPath": folder_path, "gitRepositoryUrl": repo_url,
+            "branchName": branch, "credentialKey": credential_key,
+            "description": None, "gitProviderKey": None})
+        log.info("created git folder %s", folder_path)
+
+    def git_pull(self, repo_key, folder_path) -> Optional[str]:
+        if self.dry_run:
+            log.info("[dry-run] git pull %s (repo %s)", folder_path, repo_key); return None
+        resp = self.request_ok("POST",
+            self.ws_url("gitRepositories", repo_key, "actions", "pull"),
+            body={"gitFolderPath": folder_path, "pullAction": "PULL"})
+        return (resp.headers.get("datalake-async-operation-key")
+                or resp.headers.get("aidp-async-operation-key"))
+
+    def wait_for_async(self, async_key: str) -> None:
+        if not async_key:
+            return
+        deadline = time.time() + self.poll_timeout
+        while True:
+            op = self.request_ok("GET", self.lake_url("asyncOperations", async_key)).json()
+            status = op.get("status")
+            log.info("async %s status=%s", async_key, status)
+            if status == "SUCCEEDED":
+                return
+            if status in ("FAILED", "CANCELED"):
+                raise RuntimeError("async {} ended {}: {}".format(
+                    async_key, status, op.get("messages") or op.get("message")))
+            if time.time() > deadline:
+                raise TimeoutError("async {} still {} after {}s".format(
+                    async_key, status, self.poll_timeout))
+            time.sleep(self.poll_interval)
+
+    # ---- Phase 3: clusters ----
+    def list_clusters(self) -> List[Dict[str, Any]]:
+        data = self.request_ok("GET", self.ws_url("clusters")).json()
+        return data.get("items", data) if isinstance(data, dict) else data
+
+    def find_cluster_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        for c in self.list_clusters():
+            if c.get("displayName") == name:
+                return c
+        return None
+
+    def get_cluster(self, key: str) -> Dict[str, Any]:
+        return self.request_ok("GET", self.ws_url("clusters", key)).json()
+
+    def create_cluster(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        if self.dry_run:
+            log.info("[dry-run] create cluster %s", spec.get("displayName")); return {}
+        return self.request_ok("POST", self.ws_url("clusters"), body=spec).json()
+
+    def update_cluster(self, key: str, body: Dict[str, Any]) -> Any:
+        if self.dry_run:
+            log.info("[dry-run] update cluster %s", key); return {}
+        return self.request_ok("PUT", self.ws_url("clusters", key), body=body)
+
+    # ---- Phase 4: jobs ----
+    def list_jobs(self) -> List[Dict[str, Any]]:
+        data = self.request_ok("GET", self.ws_url("jobs")).json()
+        return data.get("items", data) if isinstance(data, dict) else data
+
+    def find_job_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        for j in self.list_jobs():
+            if j.get("name") == name:
+                return j
+        return None
+
+    def get_job(self, key: str) -> Dict[str, Any]:
+        return self.request_ok("GET", self.ws_url("jobs", key)).json()
+
+    def create_job(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        if self.dry_run:
+            log.info("[dry-run] create job %s", spec.get("name")); return {}
+        return self.request_ok("POST", self.ws_url("jobs"), body=spec).json()
+
+    def update_job(self, key: str, body: Dict[str, Any]) -> Any:
+        if self.dry_run:
+            log.info("[dry-run] update job %s", key); return {}
+        return self.request_ok("PUT", self.ws_url("jobs", key), body=body)
