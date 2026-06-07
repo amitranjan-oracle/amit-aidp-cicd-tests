@@ -30,6 +30,37 @@ If the second snippet fails, the box isn't getting an instance principal — fix
 the dynamic group (`DataServices-Compute-DG`) + the IAM policy granting it
 access to `ai-data-platform-family` before continuing.
 
+## 1b. Create an instance-principal-owned Git credential (REQUIRED for git ops)
+
+AIDP resolves the `GIT_ACCOUNT` credential **in the caller's identity context**.
+A credential created by a *user* is **invisible to the instance principal**, so
+git clone/pull initiated by the box fail server-side with a generic
+`InternalError`. The fix is a `GIT_ACCOUNT` setting **owned by the instance
+principal**. Create it once, from the box, reading a GitHub PAT stored locally
+(never echo the token):
+
+```bash
+# PAT lives on the box, e.g. /home/opc/.git_pat (chmod 600)
+cd /tmp/aidp-cicd   # or wherever the repo/script is checked out on the box
+python3 - <<'PY'
+import sys; sys.path.insert(0, ".")
+import aidp_cicd as A
+c = A.AidpClient(A.load_config("config/cicd.yaml"), A.build_signer())
+pat = open("/home/opc/.git_pat").read().strip()
+body = {"name": "cicd-instance-principal", "isDefault": False,
+        "data": {"type": "GIT_ACCOUNT", "providerName": "GITHUB",
+                 "entityType": "PERSONAL_ACCESS_TOKEN",
+                 "username": "amitranjan-oracle", "personalAccessToken": pat}}
+r = c.request("POST", c.lake_url("userSettings"), body=body)
+print("status", r.status_code, "key", r.json().get("key"))
+PY
+```
+
+Put the returned key into `config/cicd.yaml` → `git.credential_key`. Verify the
+instance principal now sees it: `GET {lake}/userSettings?settingType=GIT_ACCOUNT`
+should list `cicd-instance-principal`. (Do **not** reuse a user-owned credential
+key — clone/pull will `InternalError`.)
+
 ## 2. Install the runner
 
 Get a registration token: GitHub repo → **Settings → Actions → Runners → New
