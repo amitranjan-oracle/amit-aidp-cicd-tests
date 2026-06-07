@@ -1,5 +1,5 @@
 {
-  "displayName": "ephemeral_01",
+  "displayName": "cicd_01",
   "description": null,
   "type": "USER",
   "nodeType": null,
@@ -17,12 +17,9 @@
     "type": "SPARK",
     "initScripts": [],
     "sparkVersion": "3.5.0",
-    "sparkAdvancedConfigurations": {
-      "spark.executor.extraJavaOptions": "-Dcom.amazonaws.services.s3.enableV4=true",
-      "spark.driver.extraJavaOptions": "-Dcom.amazonaws.services.s3.enableV4=true"
-    },
+    "sparkAdvancedConfigurations": {},
     "sparkEnvVariables": {}
   },
-  "autoTerminationMinutes": null,
+  "autoTerminationMinutes": 15,
   "loggingConfig": null
 }

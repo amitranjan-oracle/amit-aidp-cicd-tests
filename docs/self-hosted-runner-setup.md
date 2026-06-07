@@ -41,11 +41,11 @@ principal**. Create it once, from the box, reading a GitHub PAT stored locally
 
 ```bash
 # PAT lives on the box, e.g. /home/opc/.git_pat (chmod 600)
-cd /tmp/aidp-cicd   # or wherever the repo/script is checked out on the box
+cd <repo checkout root>   # contains deploy/ and specs/
 python3 - <<'PY'
-import sys; sys.path.insert(0, ".")
-import aidp_cicd as A
-c = A.AidpClient(A.load_config("config/cicd.yaml"), A.build_signer())
+import sys; sys.path.insert(0, "deploy")
+import aidp_deploy as A
+c = A.AidpClient(A.load_config("deploy/cicd.yaml"), A.build_signer())
 pat = open("/home/opc/.git_pat").read().strip()
 body = {"name": "cicd-instance-principal", "isDefault": False,
         "data": {"type": "GIT_ACCOUNT", "providerName": "GITHUB",
@@ -56,7 +56,7 @@ print("status", r.status_code, "key", r.json().get("key"))
 PY
 ```
 
-Put the returned key into `config/cicd.yaml` → `git.credential_key`. Verify the
+Put the returned key into `deploy/cicd.yaml` → `git.credential_key`. Verify the
 instance principal now sees it: `GET {lake}/userSettings?settingType=GIT_ACCOUNT`
 should list `cicd-instance-principal`. (Do **not** reuse a user-owned credential
 key — clone/pull will `InternalError`.)
@@ -137,9 +137,9 @@ sudo ./svc.sh install opc && sudo ./svc.sh start && sudo ./svc.sh status
 ## 7. First run
 
 Once on `main`, a push (or manual dispatch) makes the runner run
-`python3 aidp_cicd.py --config config/cicd.yaml`, which ensures
+`python3 deploy/aidp_deploy.py --config deploy/cicd.yaml`, which ensures
 `/Workspace/cicd_folder`, clones/pulls the repo into the AIDP git folder, and
-reconciles the `ephemeral_01` cluster + `cicd_workflow_job` job.
+reconciles the `cicd_01` cluster + `cicd_workflow_job` job.
 
 ## As-built record (2026-06-07)
 
@@ -150,7 +150,7 @@ reconciles the `ephemeral_01` cluster + `cicd_workflow_job` job.
   survives reboot. (The `/home` SELinux `203/EXEC` issue does not occur under
   `/opt`.) The old `~/actions-runner` was removed.
 - Instance-owned Git credential `cicd-instance-principal`
-  (`89e86bb7-5392-4a8c-a5ec-924c87546378`) created per §1b; `config/cicd.yaml`
+  (`89e86bb7-5392-4a8c-a5ec-924c87546378`) created per §1b; `deploy/cicd.yaml`
   references it. Clone + pull verified SUCCEEDED under the instance principal.
 - Branch pushed over **SSH** (workflow-scope limitation, §6). Draft PR #3 open;
   GitHub-triggered run pending merge to `main`.
