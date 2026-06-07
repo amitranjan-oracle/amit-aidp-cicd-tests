@@ -1,0 +1,28 @@
+name: aidp-cicd
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Public repo: do NOT add pull_request — forked PRs must not run on the
+# self-hosted runner (it holds the box's instance principal).
+
+concurrency:
+  group: aidp-cicd
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, aidp]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight — required Python deps present
+        run: |
+          python3 -c "import oci, requests, yaml; print('deps OK', oci.__version__, requests.__version__, yaml.__version__)"
+
+      - name: Reconcile AIDP
+        run: |
+          python3 aidp_cicd.py --config config/cicd.yaml
