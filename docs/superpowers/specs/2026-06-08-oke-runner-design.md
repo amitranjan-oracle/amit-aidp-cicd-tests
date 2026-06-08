@@ -1,5 +1,18 @@
 # OKE-Hosted GitHub Runner for AIDP CI/CD — Design
 
+> **⚠️ Amendment (2026-06-08) — as-built differs from this design; see
+> [`docs/oke-runner-setup.md`](../../oke-runner-setup.md) for the authoritative
+> runbook.** This doc planned virtual nodes + Workload Identity. In practice both
+> were dead ends in this tenancy: (1) managed node pools are blocked by enforced
+> IMDSv2; (2) virtual-node-only clusters have no kube-proxy → ClusterIP/DNS fail;
+> (3) AIDP's workspace `VolumeRequestHandler` does **not** authorize OKE Workload
+> Identity principals (mkdir/git-folder RBAC-denied), regardless of identity
+> domain. **The working design uses a self-managed OKE node (flannel, IMDSv2 at
+> launch → real kube-proxy) and authenticates to AIDP via the node's instance
+> principal** (`DataServices-Compute-DG`) — same identity model as the VM runner,
+> so OKE buys ephemeral runners, not an identity advantage. Verified green E2E.
+> The sections below are retained as the original design record.
+
 **Goal:** Run the AIDP CI/CD reconcile (`deploy/aidp_deploy.py`) on a GitHub
 self-hosted runner hosted in an **OKE Enhanced cluster** instead of (alongside)
 the `amit-cicd-compute` VM, authenticating to the AIDP data plane via **OKE
