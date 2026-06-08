@@ -320,11 +320,31 @@ class AidpClient:
                 resp.headers.get("opc-request-id")))
         return resp
 
+    def list_all(self, url: str, params: Optional[dict] = None) -> List[Dict[str, Any]]:
+        """GET every item across ALL pages, following the `opc-next-page` header.
+
+        AIDP list endpoints paginate (default page ~100 items). A single GET only
+        returns the first page, so a name lookup over one page MISSES any resource
+        past page 1 — which then surfaces as a spurious CREATE -> HTTP 409
+        "already exists". Always paginate list endpoints used for find-by-name."""
+        params = dict(params or {})
+        items: List[Dict[str, Any]] = []
+        while True:
+            resp = self.request_ok("GET", url, params=params)
+            data = resp.json()
+            page = data.get("items", data) if isinstance(data, dict) else data
+            if not isinstance(page, list):
+                return page  # unexpected shape; hand back as-is
+            items.extend(page)
+            next_page = resp.headers.get("opc-next-page")
+            if not next_page or not page:
+                return items
+            params["page"] = next_page
+
     # ---- credentials (GIT_ACCOUNT userSettings, resolved in caller identity) ----
     def list_git_account_settings(self) -> List[Dict[str, Any]]:
-        data = self.request_ok("GET", self.lake_url("userSettings"),
-                               params={"settingType": "GIT_ACCOUNT"}).json()
-        return data.get("items", data) if isinstance(data, dict) else data
+        return self.list_all(self.lake_url("userSettings"),
+                             params={"settingType": "GIT_ACCOUNT"})
 
     def _find_setting_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full GIT_ACCOUNT userSetting dict matching name, else None."""
@@ -480,8 +500,7 @@ class AidpClient:
 
     # ---- Phase 3: clusters ----
     def list_clusters(self) -> List[Dict[str, Any]]:
-        data = self.request_ok("GET", self.ws_url("clusters")).json()
-        return data.get("items", data) if isinstance(data, dict) else data
+        return self.list_all(self.ws_url("clusters"))
 
     def find_cluster_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         for c in self.list_clusters():
@@ -537,8 +556,7 @@ class AidpClient:
 
     # ---- Phase 4: jobs ----
     def list_jobs(self) -> List[Dict[str, Any]]:
-        data = self.request_ok("GET", self.ws_url("jobs")).json()
-        return data.get("items", data) if isinstance(data, dict) else data
+        return self.list_all(self.ws_url("jobs"))
 
     def find_job_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         for j in self.list_jobs():

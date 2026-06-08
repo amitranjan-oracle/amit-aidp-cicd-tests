@@ -7,8 +7,9 @@ import aidp_deploy as A
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, headers=None):
         self._payload = payload
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -243,6 +244,57 @@ class RunnerProfile(unittest.TestCase):
         finally:
             os.environ.pop("AIDP_AUTH_METHOD", None)
             sys.modules.pop("oci", None)
+
+
+class ListAllPagination(unittest.TestCase):
+    def test_follows_opc_next_page(self):
+        client, _ = _client()
+        calls = []
+        pages = [
+            (_Resp({"items": [{"name": "a"}, {"name": "b"}]}, {"opc-next-page": "P2"})),
+            (_Resp({"items": [{"name": "c"}]}, {})),  # last page: no opc-next-page
+        ]
+
+        def fake_request_ok(method, url, body=None, params=None, **k):
+            calls.append(dict(params or {}))
+            return pages[len(calls) - 1]
+
+        client.request_ok = fake_request_ok
+        items = client.list_all("http://x/jobs")
+        self.assertEqual([i["name"] for i in items], ["a", "b", "c"])  # all pages merged
+        self.assertEqual(calls[0], {})                # page 1: no page token
+        self.assertEqual(calls[1], {"page": "P2"})    # page 2: uses the header token
+
+    def test_preserves_initial_params_across_pages(self):
+        client, _ = _client()
+        seen = []
+        pages = [_Resp({"items": [{"k": 1}]}, {"opc-next-page": "N"}),
+                 _Resp({"items": [{"k": 2}]}, {})]
+
+        def fake(method, url, body=None, params=None, **k):
+            seen.append(dict(params or {}))
+            return pages[len(seen) - 1]
+
+        client.request_ok = fake
+        client.list_all("http://x/userSettings", params={"settingType": "GIT_ACCOUNT"})
+        self.assertEqual(seen[0], {"settingType": "GIT_ACCOUNT"})
+        self.assertEqual(seen[1], {"settingType": "GIT_ACCOUNT", "page": "N"})
+
+    def test_single_page_no_header(self):
+        client, _ = _client()
+        client.request_ok = lambda *a, **k: _Resp({"items": [{"name": "x"}]}, {})
+        self.assertEqual(client.list_all("http://x"), [{"name": "x"}])
+
+    def test_bare_list_payload(self):
+        client, _ = _client()
+        client.request_ok = lambda *a, **k: _Resp([{"name": "x"}], {})
+        self.assertEqual(client.list_all("http://x"), [{"name": "x"}])
+
+    def test_empty_page_stops(self):
+        client, _ = _client()
+        # a stray opc-next-page with an empty page must not loop forever
+        client.request_ok = lambda *a, **k: _Resp({"items": []}, {"opc-next-page": "Z"})
+        self.assertEqual(client.list_all("http://x"), [])
 
 
 if __name__ == "__main__":
