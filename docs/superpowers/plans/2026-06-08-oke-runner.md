@@ -26,6 +26,26 @@ provisioning (Tasks 9–10) runs from the Mac (DEFAULT profile).
 **Secrets discipline:** the PAT (Vault `amitranjan-git-pat`) and its value are
 NEVER echoed or committed. Read it into variables/stdin only.
 
+> **Amendment (2026-06-08) — credential creation moved into `aidp_deploy.py` phase 0.**
+> The GIT_ACCOUNT credential is no longer created by a separate OKE script.
+> `aidp_deploy.py` runs a **phase 0** that ensures the setting named
+> `git.credential_name` exists under the *running principal*, creating it from
+> the OCI Vault secret `git.credential_secret_id` if absent (owned correctly for
+> VM *and* OKE). Deltas to the tasks below:
+> - **Task 1** (done) implemented `select_auth_method`, `ensure_git_credential`,
+>   `_read_secret_pat`, config keys `credential_name`/`credential_secret_id`/
+>   `credential_username` (replacing `credential_key`), and phase 0 in `run()`.
+> - **Task 2/4**: the OKE workflow sets only `AIDP_AUTH_METHOD`; credential
+>   name/secret live in `deploy/cicd.yaml` (so `AIDP_GIT_CREDENTIAL_NAME` is gone).
+> - **Task 8 (`init-aidp-credential.sh`) REMOVED** — superseded by phase 0.
+> - **Task 12 REMOVED** — phase 0 creates the credential during the Task 13 run.
+> - **New IAM prerequisite:** the workload DG (and, post-merge, the VM DG
+>   `DataServices-Compute-DG`) need `allow dynamic-group <DG> to read
+>   secret-bundles in compartment DataServices`. Hand this to the user with the
+>   Task 10 role-add.
+> - **Compartment:** NSGs, cluster, node pool are all in **DataServices**; the
+>   dynamic group is the exception (tenancy/identity-domain scoped).
+
 ---
 
 ## File Structure

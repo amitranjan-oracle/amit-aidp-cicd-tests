@@ -140,21 +140,27 @@ OCI CLI auth (instance principal or config) to run
 - The PAT must have **`repo`** scope (covers both AIDP server-side clone and
   repo-level ARC registration). Scope is verified before bootstrap.
 
-### 4.3 Why a separate AIDP git credential (`cicd-workload-principal`)
+### 4.3 The AIDP git credential — created from the OCI secret in phase 0
 - AIDP performs git-folder clone/pull **server-side**, authenticated by a
-  **GIT_ACCOUNT userSetting** referenced via `credential_key`, resolved **in the
-  caller's identity context**. AIDP cannot read an OCI Vault secret directly.
+  **GIT_ACCOUNT userSetting**, resolved **in the caller's identity context**.
+  AIDP cannot read an OCI Vault secret directly.
 - The OKE workload principal is a **different** principal than the VM instance
-  principal, so the VM's `cicd-instance-principal` credential is **invisible** to
-  it (would `InternalError` on clone — the bug already burned us once).
-- Therefore create a new GIT_ACCOUNT setting **`cicd-workload-principal`**, and
-  it **must be created under Workload Identity (from a pod)** so AIDP records the
-  workload principal as owner. The PAT value is sourced from the same Vault
-  secret. **The same token backs all three stores** (Vault = canonical, k8s
-  Secret = runner, AIDP userSetting = backend); only the *storage* differs.
-- **Sequencing:** cluster → WI/DG/role → `init-aidp-credential` (WI pod creates
-  `cicd-workload-principal`) → the OKE runner resolves it **by name** via
-  `AIDP_GIT_CREDENTIAL_NAME=cicd-workload-principal` (no key copying).
+  principal, so a setting owned by one is **invisible** to the other (would
+  `InternalError` on clone — the bug already burned us once).
+- **Mechanism — `aidp_deploy.py` phase 0, applies to BOTH runners:** before the
+  directory/clone, the script ensures a GIT_ACCOUNT setting named
+  `git.credential_name` exists *under the running principal*, **creating it from
+  `git.credential_secret_id` (an OCI Vault secret) if absent**. Because the
+  running principal creates it, ownership is automatically correct (instance
+  principal on the VM, workload identity on OKE). One Vault secret backs both the
+  k8s Secret (runner registration) and the AIDP credential; only storage differs.
+- **New IAM prerequisite:** reading the Vault secret is an OCI call, so the
+  running principal needs `allow dynamic-group <DG> to read secret-bundles in
+  compartment DataServices`. Required for the OKE workload DG (creates its
+  credential on first run) and for the VM DG (once this merges to main and the VM
+  starts running phase 0). Surfaced to the user alongside the role-add.
+- This **removes** the separate `init-aidp-credential.sh`: phase 0 of the normal
+  reconcile run creates the credential, owned correctly, with no key-copying.
 
 ## 5. Component / file layout
 
@@ -165,7 +171,6 @@ oke/
   create-workload-dg.sh       # oci iam dynamic-group create (WI rule) -> prints DG OCID
   bootstrap-runner.sh         # create-kubeconfig; ns + SA; PAT k8s Secret (from Vault);
                               #   helm install ARC controller + runner scale set
-  init-aidp-credential.sh     # kubectl-run a WI pod that creates cicd-workload-principal
   namespaces.yaml             # arc-systems, arc-runners
   runner-serviceaccount.yaml  # aidp-runner-sa (the WI subject)
   values-controller.yaml      # gha-runner-scale-set-controller Helm values
@@ -175,31 +180,32 @@ oke/
   config.env                  # operator-edited vars (OCIDs, names) sourced by the scripts
 docs/oke-runner-setup.md      # README/runbook: prereqs, network/security, ordered steps, verify
 .github/workflows/cicd-oke.yml# workflow_dispatch; runs-on: amit-cicd-oke;
-                              #   env AIDP_AUTH_METHOD + AIDP_GIT_CREDENTIAL_NAME;
-                              #   actions/setup-python -> pip install -> reconcile
-deploy/aidp_deploy.py         # + WI signer branch + AIDP_GIT_CREDENTIAL_KEY override (VM unchanged)
+                              #   env AIDP_AUTH_METHOD; setup-python -> pip -> reconcile
+deploy/aidp_deploy.py         # + WI signer branch + phase 0 (ensure GIT_ACCOUNT from OCI secret); VM-safe
 ```
 
 The scripts are **thin and heavily commented** — each runs the exact commands the
 README documents (the README is the source of truth). `config.env` centralizes
 the discovered OCIDs so the scripts have no magic literals.
 
-## 6. Change to `deploy/aidp_deploy.py` (minimal, VM-safe)
+## 6. Changes to `deploy/aidp_deploy.py` (minimal, VM-safe)
 
-- `build_signer()` gains a branch: if `os.environ.get("AIDP_AUTH_METHOD") ==
-  "oke_workload_identity"`, return
-  `oci.auth.signers.get_oke_workload_identity_resource_principal_signer()`
-  (guarded by `ImportError`, like the existing RP guard).
-- The AIDP git credential is resolved **by name** at runtime: when env
-  `AIDP_GIT_CREDENTIAL_NAME` is set, the script queries
-  `GET userSettings?settingType=GIT_ACCOUNT` under the current principal and uses
-  the `key` of the setting with that `name`; otherwise it uses the yaml
-  `git.credential_key`. This avoids copying a freshly-generated credential key
-  into config — the OKE workflow just names `cicd-workload-principal`.
-- **VM path is byte-for-byte unchanged:** no env set ⇒ existing RP→instance-
-  principal detection and the yaml `credential_key`. Single source of truth for
-  the AIDP *target* stays in `deploy/cicd.yaml`; only the two principal-specific
-  knobs (`AIDP_AUTH_METHOD`, `AIDP_GIT_CREDENTIAL_NAME`) are env-set on OKE.
+- `select_auth_method(env)` + `build_signer()`: priority OKE workload identity
+  (`AIDP_AUTH_METHOD=oke_workload_identity`) > resource principal (env) > instance
+  principal. WI uses
+  `oci.auth.signers.get_oke_workload_identity_resource_principal_signer()`.
+- **Phase 0 — `ensure_git_credential(cfg)`:** ensures the GIT_ACCOUNT setting
+  named `git.credential_name` exists under the current principal, creating it
+  from `git.credential_secret_id` (via `oci.secrets`/`oci.vault`) if absent.
+  Runs before Phase 1 for both runners. `resolve_git_credential_key(cfg)` then
+  resolves its key by name for the clone.
+- **Config:** `git.credential_name` + `credential_secret_id` + `credential_username`
+  (+ optional `credential_secret_compartment` for name-based secret lookup)
+  replace `credential_key`. Same `deploy/cicd.yaml` serves both runners; OKE sets
+  only `AIDP_AUTH_METHOD` via the workflow env.
+- **VM-safe:** no `AIDP_AUTH_METHOD` ⇒ instance-principal signer (current
+  behaviour). Phase 0 is idempotent — if the named setting already exists it is
+  reused with no secret read.
 
 ## 7. Security considerations
 
@@ -222,8 +228,9 @@ Live end-to-end is performed after provisioning:
 2. WI smoke test: a one-off pod under `aidp-runner-sa` runs
    `InstancePrincipalsSecurityTokenSigner`-equivalent WI signer and lists AIDP
    workspaces — proves the DG→role authorization works.
-3. `init-aidp-credential` creates `cicd-workload-principal`; verify via
-   `GET userSettings?settingType=GIT_ACCOUNT` under WI lists it.
+3. The first reconcile run's **phase 0** creates the GIT_ACCOUNT setting under
+   the workload principal (reading the OCI secret); verify via
+   `GET userSettings?settingType=GIT_ACCOUNT` under WI that it appears.
 4. Trigger `cicd-oke.yml` (`workflow_dispatch`) → watch an ephemeral runner pod
    spawn, the reconcile run, then pod terminate.
 5. Verify via MCP that the git folder pulled and `cicd_workflow_job`/`cicd_01`
@@ -240,6 +247,10 @@ Live end-to-end is performed after provisioning:
   (§4.1 note); iterate on rejection.
 - **PAT scope** — confirm `repo` (and that repo-level ARC accepts it) before
   bootstrap; if ARC needs broader scope, surface it rather than silently failing.
+- **Secret-read IAM policy (phase 0)** — the workload DG (and, post-merge, the VM
+  DG) need `read secret-bundles` on the PAT secret; without it phase 0 fails to
+  create the credential. Surfaced with the role-add. Confirm the secret's
+  compartment for the policy scope.
 - **WI signer prerequisites** — Enhanced cluster + supported k8s version + the
   projected SA token; if the signer can't bootstrap in-pod, capture the error and
   diagnose (don't conclude "principal lacks privilege" prematurely — that was a
