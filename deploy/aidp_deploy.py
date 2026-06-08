@@ -23,35 +23,62 @@ import yaml
 
 log = logging.getLogger("aidp-cicd")
 
-# Required config keys as (section, key) pairs.
+# API version is paired with the path-prefix surface; an explicit aidp.api_version
+# overrides this (mirrors ai-data-engineer-agent's base_client default_api_version_for).
+_PREFIX_API_VERSION = {"aiDataPlatforms": "20260430", "dataLakes": "20240831"}
+DEFAULT_API_VERSION = "20260430"
+
+
+def default_api_version_for(path_prefix: str) -> str:
+    """API version paired with *path_prefix* (dataLakes->20240831, aiDataPlatforms->20260430)."""
+    return _PREFIX_API_VERSION.get(path_prefix, DEFAULT_API_VERSION)
+
+
+# Required config keys. Other values are DERIVED, not configured:
+#   aidp.api_version      <- default_api_version_for(path_prefix) [override optional]
+#   git.folder_path       <- parent_dir + repo name (from repository_url) [AIDP_FOLDER_PATH override]
+#   compute.name          <- compute spec's displayName
+#   workflow.name         <- workflow spec's name
+#   workflow.cluster_name <- workflow spec's jobClusters[].clusterName
 REQUIRED_CONFIG_KEYS = [
     ("aidp", "region"), ("aidp", "data_lake_ocid"), ("aidp", "path_prefix"),
-    ("aidp", "api_version"), ("aidp", "workspace_key"),
+    ("aidp", "workspace_key"),
     ("git", "repository_url"), ("git", "branch"),
     ("git", "credential_name"), ("git", "credential_secret_id"),
-    ("git", "credential_username"),
-    ("git", "parent_dir"), ("git", "folder_path"),
-    ("compute", "name"), ("compute", "spec_file"),
-    ("workflow", "name"), ("workflow", "spec_file"), ("workflow", "cluster_name"),
+    ("git", "credential_username"), ("git", "parent_dir"),
+    ("compute", "spec_file"),
+    ("workflow", "spec_file"),
 ]
+
+
+def resolve_folder_path(cfg: Dict[str, Any]) -> str:
+    """The AIDP git folder path: env AIDP_FOLDER_PATH wins (per-runner override),
+    else git.parent_dir + the repo name parsed from git.repository_url."""
+    import os
+    env = os.environ.get("AIDP_FOLDER_PATH")
+    if env:
+        return env
+    g = cfg["git"]
+    repo = g["repository_url"].rstrip("/").split("/")[-1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    return g["parent_dir"].rstrip("/") + "/" + repo
 
 
 def load_config(path: str) -> Dict[str, Any]:
     """Load + validate the YAML config; raise ValueError listing all missing keys.
 
-    A few git fields may be overridden per-runner via env so independent runners
-    can target distinct AIDP git folders (per-instance-principal credential
-    ownership means two runners can't share one folder's pull credential):
-      AIDP_PARENT_DIR -> git.parent_dir, AIDP_FOLDER_PATH -> git.folder_path.
+    git.parent_dir may be overridden per-runner via AIDP_PARENT_DIR (and the
+    derived folder path via AIDP_FOLDER_PATH) so independent runners target
+    distinct AIDP git folders — per-instance-principal credential ownership means
+    two runners can't share one folder's pull credential.
     """
     import os
     with open(path) as f:
         cfg = yaml.safe_load(f) or {}
-    for envk, sec, key in (("AIDP_PARENT_DIR", "git", "parent_dir"),
-                           ("AIDP_FOLDER_PATH", "git", "folder_path")):
-        v = os.environ.get(envk)
-        if v and isinstance(cfg.get(sec), dict):
-            cfg[sec][key] = v
+    v = os.environ.get("AIDP_PARENT_DIR")
+    if v and isinstance(cfg.get("git"), dict):
+        cfg["git"]["parent_dir"] = v
     missing = []
     for section, key in REQUIRED_CONFIG_KEYS:
         sec = cfg.get(section)
@@ -230,7 +257,7 @@ class AidpClient:
         self.region = a["region"]
         self.data_lake_id = a["data_lake_ocid"]
         self.path_prefix = a["path_prefix"]
-        self.api_version = str(a["api_version"])
+        self.api_version = str(a.get("api_version") or default_api_version_for(self.path_prefix))
         self.workspace_key = a["workspace_key"]
         self.signer = signer
         self.verify_tls = bool(cfg.get("options", {}).get("verify_tls", True))
@@ -532,61 +559,65 @@ def phase1_directory(client: "AidpClient", cfg: Dict[str, Any]) -> None:
 def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 2: git folder (create or pull) ==")
     g = cfg["git"]
+    fp = resolve_folder_path(cfg)  # derived: parent_dir + repo name (or AIDP_FOLDER_PATH)
     if client.offline:
         log.info("[offline dry-run] would create-or-pull git folder %s (%s@%s)",
-                 g["folder_path"], g["repository_url"], g["branch"]); return
-    meta = client.git_folder_metadata(g["folder_path"])
+                 fp, g["repository_url"], g["branch"]); return
+    meta = client.git_folder_metadata(fp)
     if meta.get("isAssociated") and meta.get("repoKey"):
         log.info("git folder exists; pulling %s", g["branch"])
-        client.wait_for_async(client.git_pull(meta["repoKey"], g["folder_path"], g["branch"]))
+        client.wait_for_async(client.git_pull(meta["repoKey"], fp, g["branch"]))
     else:
         log.info("git folder absent; cloning")
         cred_key = client.resolve_git_credential_key(cfg)
         client.wait_for_async(client.create_git_folder(
-            g["folder_path"], g["repository_url"], g["branch"], cred_key))
+            fp, g["repository_url"], g["branch"], cred_key))
 
 
 def phase3_compute(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 3: reconcile compute ==")
     desired = load_spec(cfg["compute"]["spec_file"])
+    name = desired.get("displayName")  # derived from the spec (not duplicated in config)
     if client.offline:
-        log.info("[offline dry-run] validated spec for cluster %s; skipping live check",
-                 cfg["compute"]["name"]); return
-    found = client.find_cluster_by_name(cfg["compute"]["name"])
+        log.info("[offline dry-run] validated spec for cluster %s; skipping live check", name); return
+    found = client.find_cluster_by_name(name)
     if found is None:
-        log.info("cluster %s absent -> CREATE", cfg["compute"]["name"])
+        log.info("cluster %s absent -> CREATE", name)
         client.create_cluster(desired)
         return
     live = client.get_cluster(found["key"])  # full repr — the list view summarizes config
     if cluster_in_sync(desired, live):
-        log.info("cluster %s already in sync -> NO-OP", cfg["compute"]["name"])
+        log.info("cluster %s already in sync -> NO-OP", name)
     else:
-        log.info("cluster %s differs -> UPDATE", cfg["compute"]["name"])
+        log.info("cluster %s differs -> UPDATE", name)
         client.update_cluster(found["key"], {**live, **desired})
 
 
 def phase4_job(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 4: reconcile job ==")
-    w = cfg["workflow"]
-    desired = load_spec(w["spec_file"])
+    desired = load_spec(cfg["workflow"]["spec_file"])
+    name = desired.get("name")  # derived from the spec
+    jobclusters = desired.get("jobClusters") or []
+    cluster_name = jobclusters[0].get("clusterName") if jobclusters else None  # cluster the job binds to
     if client.offline:
-        log.info("[offline dry-run] validated spec for job %s; skipping live check",
-                 w["name"]); return
-    cluster = client.find_cluster_by_name(w["cluster_name"])
+        log.info("[offline dry-run] validated spec for job %s; skipping live check", name); return
+    if not cluster_name:
+        raise RuntimeError("job spec {} has no jobClusters[].clusterName to bind".format(
+            cfg["workflow"]["spec_file"]))
+    cluster = client.find_cluster_by_name(cluster_name)
     if cluster is None:
-        raise RuntimeError("cluster {} not found; Phase 3 must create it first".format(
-            w["cluster_name"]))
+        raise RuntimeError("cluster {} not found; Phase 3 must create it first".format(cluster_name))
     desired_keyed = inject_cluster_key(desired, cluster["key"])
-    found = client.find_job_by_name(w["name"])
+    found = client.find_job_by_name(name)
     if found is None:
-        log.info("job %s absent -> CREATE", w["name"])
+        log.info("job %s absent -> CREATE", name)
         client.create_job(desired_keyed)
         return
     current = client.get_job(found["key"])  # full repr for an accurate diff
     if job_in_sync(desired, current):
-        log.info("job %s already in sync -> NO-OP", w["name"])
+        log.info("job %s already in sync -> NO-OP", name)
     else:
-        log.info("job %s differs -> UPDATE", w["name"])
+        log.info("job %s differs -> UPDATE", name)
         client.update_job(found["key"], {**current, **desired_keyed})
 
 

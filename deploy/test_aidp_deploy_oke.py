@@ -142,5 +142,39 @@ class EnsureGitCredential(unittest.TestCase):
             client.ensure_git_credential(cfg)
 
 
+class DerivedConfig(unittest.TestCase):
+    def test_api_version_map(self):
+        self.assertEqual(A.default_api_version_for("dataLakes"), "20240831")
+        self.assertEqual(A.default_api_version_for("aiDataPlatforms"), "20260430")
+        self.assertEqual(A.default_api_version_for("other"), A.DEFAULT_API_VERSION)
+
+    def test_client_derives_api_version_when_absent(self):
+        cfg = {"aidp": {"region": "r", "data_lake_ocid": "d", "path_prefix": "dataLakes",
+                        "workspace_key": "w"}, "git": {}}
+        self.assertEqual(A.AidpClient(cfg, signer=None).api_version, "20240831")
+
+    def test_client_api_version_override(self):
+        cfg = {"aidp": {"region": "r", "data_lake_ocid": "d", "path_prefix": "dataLakes",
+                        "api_version": "99999999", "workspace_key": "w"}, "git": {}}
+        self.assertEqual(A.AidpClient(cfg, signer=None).api_version, "99999999")
+
+    def test_folder_path_derived_from_repo(self):
+        import os
+        os.environ.pop("AIDP_FOLDER_PATH", None)
+        cfg = {"git": {"repository_url": "https://github.com/x/my-repo.git",
+                       "parent_dir": "/Workspace/cicd_folder"}}
+        self.assertEqual(A.resolve_folder_path(cfg), "/Workspace/cicd_folder/my-repo")
+
+    def test_folder_path_env_override(self):
+        import os
+        os.environ["AIDP_FOLDER_PATH"] = "/Workspace/cicd_folder/my-repo-oke"
+        try:
+            cfg = {"git": {"repository_url": "https://github.com/x/my-repo.git",
+                           "parent_dir": "/Workspace/cicd_folder"}}
+            self.assertEqual(A.resolve_folder_path(cfg), "/Workspace/cicd_folder/my-repo-oke")
+        finally:
+            os.environ.pop("AIDP_FOLDER_PATH", None)
+
+
 if __name__ == "__main__":
     unittest.main()

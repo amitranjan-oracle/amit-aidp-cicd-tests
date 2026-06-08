@@ -1,30 +1,25 @@
 aidp:
   region: us-ashburn-1
   data_lake_ocid: ocid1.datalake.oc1.iad.amaaaaaaai22xpqarb4qw6bcev7yokxk3ftd4ucefw2ofs7fbfudefs6x5sa
-  path_prefix: dataLakes
-  api_version: "20240831"
+  path_prefix: dataLakes          # api_version derived from this (dataLakes -> 20240831); set aidp.api_version to override
   workspace_key: f95a83f8-9bd1-4259-a45f-ea1c3a5a7516   # playground
 
 git:
   repository_url: https://github.com/amitranjan-oracle/amit-aidp-cicd-tests.git
   branch: main
   # Phase 0 ensures this GIT_ACCOUNT user-setting exists under the running
-  # principal (instance principal on the VM, workload identity on OKE), creating
-  # it from credential_secret_id if absent. Each principal owns its own copy.
+  # principal (instance principal on the VM / OKE node), creating it from
+  # credential_secret_id if absent. Each principal owns its own copy.
   credential_name: cicd-git-account
   credential_secret_id: ocid1.vaultsecret.oc1.iad.amaaaaaaai22xpqatzdboqsmngy72nhogsg32okj63o6h2ex2mwahvzfxqsq   # OCI Vault secret holding the GitHub PAT
   credential_username: amitranjan-oracle
-  parent_dir: /Workspace/cicd_folder
-  folder_path: /Workspace/cicd_folder/amit-aidp-cicd-tests
+  parent_dir: /Workspace/cicd_folder   # folder path derived: parent_dir + repo name (AIDP_FOLDER_PATH env overrides per-runner)
 
 compute:
-  name: cicd_01
-  spec_file: specs/cicd_01.cluster.json
+  spec_file: specs/cicd_01.cluster.json          # cluster name = the spec's displayName
 
 workflow:
-  name: cicd_workflow_job
-  spec_file: specs/cicd_workflow_job.job.json
-  cluster_name: cicd_01
+  spec_file: specs/cicd_workflow_job.job.json    # job name + bound cluster come from the spec
 
 options:
   verify_tls: true
