@@ -87,8 +87,8 @@ if [ -z "$CLUSTER" ]; then
     --kubernetes-version "$K8S_VERSION" --type ENHANCED_CLUSTER \
     --endpoint-subnet-id "$SUBNET_OCID" --endpoint-nsg-ids "[\"$API_NSG\"]" \
     --endpoint-public-ip-enabled false \
-    --services-cidr "$SERVICE_CIDR" \
-    --cluster-pod-network-options '[{"cniType":"OCI_VCN_IP_NATIVE"}]' \
+    --pods-cidr "$POD_CIDR" --services-cidr "$SERVICE_CIDR" \
+    --cluster-pod-network-options '[{"cniType":"FLANNEL_OVERLAY"}]' \
     --region "$REGION" >/dev/null
   for i in $(seq 1 60); do CLUSTER=$(find_cluster); [ -n "$CLUSTER" ] && [ "$CLUSTER" != "null" ] && break; sleep 5; done
 fi
@@ -102,28 +102,10 @@ for i in $(seq 1 120); do
   sleep 15
 done
 
-# --- 4. Virtual node pool (serverless pods; no IMDS issue) ---
-# Managed node pools can't launch here (tenancy enforces IMDSv2; OKE node pools
-# expose no IMDS knob). Virtual nodes run pods on OCI-managed infra. Requires the
-# cluster to be OCI_VCN_IP_NATIVE (set above). create is async -> submit, find, poll.
-find_vnp(){ oci ce virtual-node-pool list -c "$COMPARTMENT_OCID" --cluster-id "$CLUSTER" --region "$REGION" \
-  --query "data[?\"display-name\"=='$VNODE_POOL_NAME' && \"lifecycle-state\"!='DELETED' && \"lifecycle-state\"!='DELETING'].id | [0]" --raw-output 2>/dev/null || true; }
-VNP=$(find_vnp); [ "$VNP" = "null" ] && VNP=""
-if [ -z "$VNP" ]; then
-  oci ce virtual-node-pool create \
-    --cluster-id "$CLUSTER" --compartment-id "$COMPARTMENT_OCID" --display-name "$VNODE_POOL_NAME" \
-    --placement-configurations "[{\"availabilityDomain\":\"$AVAILABILITY_DOMAIN\",\"subnetId\":\"$VNODE_SUBNET_OCID\"}]" \
-    --pod-configuration "{\"subnetId\":\"$POD_SUBNET_OCID\",\"shape\":\"$POD_SHAPE\",\"nsgIds\":[\"$NODE_NSG\"]}" \
-    --nsg-ids "[\"$NODE_NSG\"]" --size "$VNODE_SIZE" --region "$REGION" >/dev/null
-  for i in $(seq 1 30); do VNP=$(find_vnp); [ -n "$VNP" ] && [ "$VNP" != "null" ] && break; sleep 5; done
-fi
-echo "VNODE_POOL=$VNP" >> "$STATE"
-log "VNODE_POOL=$VNP — waiting for ACTIVE"
-for i in $(seq 1 60); do
-  ST=$(oci ce virtual-node-pool get --virtual-node-pool-id "$VNP" --region "$REGION" --query 'data."lifecycle-state"' --raw-output 2>/dev/null || true)
-  printf '  vnode pool state=%s\n' "$ST"
-  [ "$ST" = "ACTIVE" ] && break
-  { [ "$ST" = "FAILED" ] || [ "$ST" = "NEEDS_ATTENTION" ]; } && { echo "vnode pool $ST"; break; }
-  sleep 15
-done
-log "Done. state.env:"; cat "$STATE"
+# Nodes are SELF-MANAGED. Managed node pools are blocked by this tenancy's IMDSv2
+# enforcement (OKE node pools expose no IMDS knob), and virtual-node-only clusters
+# have no kube-proxy so ClusterIP/DNS break. So we join a real node (the existing
+# amit-cicd-compute VM, which boots with IMDSv2) separately:
+#   oke/add-self-managed-node.sh   -> real node => kube-proxy => ClusterIP/DNS work.
+log "Done (cluster only). Add a node with: oke/add-self-managed-node.sh"
+log "state.env:"; cat "$STATE"

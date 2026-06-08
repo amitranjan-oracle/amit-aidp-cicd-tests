@@ -7,8 +7,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 set -a; . "$HERE/config.env"; . "$HERE/state.env"; set +a
 
-# On a host without an OCI config (e.g. amitdemografana) use the instance
-# principal for all oci calls AND for the kubeconfig generate-token exec plugin.
+# kubectl/helm live in /usr/bin; a self-contained oci CLI may be in ~/bin or
+# ~/.local/bin (non-interactive SSH starts with a minimal PATH).
+export PATH="$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+
+# On a host without an OCI config (e.g. the bastion) use the instance principal
+# for all oci calls AND for the kubeconfig generate-token exec plugin.
 [ -f "$HOME/.oci/config" ] || export OCI_CLI_AUTH=instance_principal
 
 # --- 1. kubeconfig for the private endpoint ---
