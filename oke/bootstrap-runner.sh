@@ -7,6 +7,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 set -a; . "$HERE/config.env"; . "$HERE/state.env"; set +a
 
+# On a host without an OCI config (e.g. amitdemografana) use the instance
+# principal for all oci calls AND for the kubeconfig generate-token exec plugin.
+[ -f "$HOME/.oci/config" ] || export OCI_CLI_AUTH=instance_principal
+
 # --- 1. kubeconfig for the private endpoint ---
 export KUBECONFIG="$HOME/.kube/config-aidp-cicd"
 oci ce cluster create-kubeconfig --cluster-id "$CLUSTER" --region "$REGION" \
