@@ -50,7 +50,7 @@ runner) is explicitly **out of scope** for this branch.
 ### ARC consequence — how `runs-on` works here
 With `gha-runner-scale-set`, a job targets the **runner scale set's installation
 name**, *not* an AND-matched label list. The OKE job uses
-`runs-on: oke-aidp-runners` (the Helm release / scale-set name). The legacy
+`runs-on: aidp-cicd-runners` (the Helm release / scale-set name). The legacy
 `runs-on: [self-hosted, oke, aidp]` label model does **not** apply to this chart.
 
 ## 3. Network design (discovered, real values)
@@ -83,17 +83,27 @@ name**, *not* an AND-matched label list. The OKE job uses
   overlap the VCN `10.0.0.0/16` at the routing layer because flannel pod traffic
   is overlay-encapsulated; service CIDR is cluster-internal only.
 
-**kubectl reachability:** the API endpoint is private, so `kubectl`/`helm` run
-from inside the VCN — i.e. from `amit-cicd-compute` (reached via the
-`amitdemografana` bastion, the established access path), using
-`oci ce cluster create-kubeconfig`.
+**kubectl reachability:** the API endpoint is private (in `10.0.1.0/24`).
+`amitdemografana` (`10.0.0.54`, `public subnet-dsvcn`) is in the **same VCN**, so
+it reaches the endpoint via intra-VCN routing — `kubectl`/`helm` run **directly
+on `amitdemografana`** (no second hop to `amit-cicd-compute`). The API NSG allows
+ingress on 6443 from the public subnet (`10.0.0.0/24`). `amitdemografana` needs
+OCI CLI auth (instance principal or config) to run
+`oci ce cluster create-kubeconfig` + `generate-token`.
 
-### Cluster shape
+### Cluster shape (minimal / cost-conscious)
+- **Names** (theme `aidp-cicd-test` — testing AIDP CI/CD via GitHub): cluster
+  `aidp-cicd-test`; node pool `aidp-cicd-test-np`; NSGs `aidp-cicd-test-api-nsg`
+  / `aidp-cicd-test-node-nsg`; workload DG `aidp-cicd-test-workload-dg`; runner
+  scale set `aidp-cicd-runners` (= the `runs-on` value); namespaces `arc-systems`
+  / `arc-runners`; ServiceAccount `aidp-runner-sa`.
 - **Type: Enhanced** (required for Workload Identity).
-- **Kubernetes: v1.34.2** (recent stable; latest available is v1.36.0). Node
-  pool version ≤ control-plane version.
-- **Node pool:** 1 node, `VM.Standard.E4.Flex` (2 OCPU / 16 GB), AD-1, OL8 OKE
-  worker image, in `10.0.1.0/24`. Sized for ephemeral runner pods; scale later.
+- **Kubernetes: v1.34.2** (node pool version ≤ control-plane version).
+- **Node pool:** **1 node, `VM.Standard.E4.Flex`, 1 OCPU / 8 GB**, AD-1, OL8 OKE
+  worker image, in `10.0.1.0/24`. Cheapest shape that reliably runs the OKE
+  system pods + ARC controller/listener + one short-lived runner pod (no heavy
+  workload here). Bump memory first if a runner can't schedule. README documents
+  scaling the node pool to 0 / deleting the cluster when idle to stop billing.
 
 ## 4. Identity & auth model
 
@@ -160,11 +170,11 @@ oke/
   runner-serviceaccount.yaml  # aidp-runner-sa (the WI subject)
   values-controller.yaml      # gha-runner-scale-set-controller Helm values
   values-runnerset.yaml       # gha-runner-scale-set values: repo URL, PAT secret ref,
-                              #   scaleSetName=oke-aidp-runners, min/maxRunners,
+                              #   scaleSetName=aidp-cicd-runners, min/maxRunners,
                               #   template.spec.serviceAccountName=aidp-runner-sa (WI subject)
   config.env                  # operator-edited vars (OCIDs, names) sourced by the scripts
 docs/oke-runner-setup.md      # README/runbook: prereqs, network/security, ordered steps, verify
-.github/workflows/cicd-oke.yml# workflow_dispatch; runs-on: oke-aidp-runners;
+.github/workflows/cicd-oke.yml# workflow_dispatch; runs-on: aidp-cicd-runners;
                               #   env AIDP_AUTH_METHOD + AIDP_GIT_CREDENTIAL_NAME;
                               #   actions/setup-python -> pip install -> reconcile
 deploy/aidp_deploy.py         # + WI signer branch + AIDP_GIT_CREDENTIAL_KEY override (VM unchanged)
