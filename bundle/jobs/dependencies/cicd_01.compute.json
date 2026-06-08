@@ -1,0 +1,34 @@
+{
+  "displayName" : "cicd_01",
+  "description" : null,
+  "type" : "USER",
+  "nodeType" : null,
+  "driverConfig" : {
+    "driverNodeType" : null,
+    "driverShape" : "amd.generic",
+    "driverShapeConfig" : {
+      "ocpus" : 2,
+      "gpus" : 0,
+      "memoryInGBs" : 32
+    }
+  },
+  "workerConfig" : {
+    "workerShape" : "amd.generic",
+    "workerShapeConfig" : {
+      "ocpus" : 2,
+      "gpus" : 0,
+      "memoryInGBs" : 32
+    },
+    "minWorkerCount" : 1,
+    "maxWorkerCount" : 1
+  },
+  "clusterRuntimeConfig" : {
+    "type" : "SPARK",
+    "initScripts" : [ ],
+    "sparkVersion" : "3.5.0",
+    "sparkAdvancedConfigurations" : { },
+    "sparkEnvVariables" : { }
+  },
+  "loggingConfig" : null,
+  "autoTerminationMinutes" : 15
+}

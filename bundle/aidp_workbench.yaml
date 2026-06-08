@@ -1,0 +1,5 @@
+bundle:
+  name: "bundle"
+resources:
+  jobs:
+  - "cicd_workflow_job"

@@ -1,0 +1,71 @@
+{
+  "runAs" : null,
+  "name" : "cicd_workflow_job",
+  "description" : "",
+  "schedule" : {
+    "quartzCronExpression" : "0 0 16 * * ?",
+    "timezoneId" : "UTC",
+    "pauseStatus" : null
+  },
+  "continuous" : null,
+  "maxConcurrentRuns" : 1,
+  "gitConfig" : null,
+  "queue" : null,
+  "path" : "jobs",
+  "jobClusters" : [ {
+    "clusterKey" : "${jobs.dependencies.cicd_01.compute.key}",
+    "newCluster" : null
+  } ],
+  "tasks" : [ {
+    "type" : "NOTEBOOK_TASK",
+    "taskKey" : "set_parameter",
+    "dependsOn" : [ ],
+    "runIf" : "ALL_SUCCESS",
+    "maxRetries" : 0,
+    "minRetryIntervalMillis" : null,
+    "isRetryOnTimeout" : null,
+    "notebookPath" : "${bundle.root}/.aidp/artifacts/cicd_test/amit-aidp-cicd-tests/src/set_parameter.ipynb",
+    "source" : null,
+    "gitConfig" : null,
+    "cluster" : {
+      "clusterKey" : "${jobs.dependencies.cicd_01.compute.key}",
+      "newCluster" : null
+    },
+    "parameters" : [ ],
+    "timeoutSeconds" : null,
+    "isStreaming" : null
+  }, {
+    "type" : "NOTEBOOK_TASK",
+    "taskKey" : "print_parameter",
+    "dependsOn" : [ {
+      "taskKey" : "set_parameter",
+      "outcome" : null
+    } ],
+    "runIf" : "ALL_SUCCESS",
+    "maxRetries" : 0,
+    "minRetryIntervalMillis" : null,
+    "isRetryOnTimeout" : null,
+    "notebookPath" : "${bundle.root}/.aidp/artifacts/cicd_test/amit-aidp-cicd-tests/src/print_parameter.ipynb",
+    "source" : null,
+    "gitConfig" : null,
+    "cluster" : {
+      "clusterKey" : "${jobs.dependencies.cicd_01.compute.key}",
+      "newCluster" : null
+    },
+    "parameters" : [ {
+      "name" : "job_param",
+      "value" : "{{job.parameters.job_param}}"
+    }, {
+      "name" : "task_param",
+      "value" : "{{job.parameters.job_param}}"
+    } ],
+    "timeoutSeconds" : null,
+    "isStreaming" : null
+  } ],
+  "parameters" : [ {
+    "name" : "job_param",
+    "value" : "custom_value"
+  } ],
+  "timeoutSeconds" : null,
+  "jobTag" : null
+}
