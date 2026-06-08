@@ -25,4 +25,4 @@ jobs:
 
       - name: Reconcile AIDP
         run: |
-          python3 deploy/aidp_deploy.py --config deploy/cicd.yaml
+          python3 deploy/aidp_deploy.py --config deploy/cicd.yaml --runner vm

@@ -22,10 +22,10 @@ export OCI_CLI_AUTH="${OCI_CLI_AUTH:-instance_principal}"
 # driver: under WI, create the GIT_ACCOUNT setting from env GIT_PAT if absent
 cat >/tmp/mkcred.py <<'PY'
 import os, sys
-sys.path.insert(0, "/work/deploy")
+sys.path.insert(0, "/tmp/repo/deploy")
 os.environ["AIDP_AUTH_METHOD"] = "oke_workload_identity"
 import aidp_deploy as A
-cfg = A.load_config("/work/deploy/cicd.yaml")
+cfg = A.load_config("/tmp/repo/deploy/cicd.yaml")
 client = A.AidpClient(cfg, A.build_signer())
 g = cfg["git"]; name = g["credential_name"]; pat = os.environ["GIT_PAT"]
 existing = A._find_setting_key_by_name(client.list_git_account_settings(), name)
@@ -59,8 +59,8 @@ spec:
         - >
           set -e;
           sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip git >/dev/null;
-          git clone -q -b feat/oke-runner "$GITHUB_CONFIG_URL" /work;
-          pip3 install -q oci requests pyyaml;
+          git clone -q -b feat/oke-runner "$GITHUB_CONFIG_URL" /tmp/repo;
+          pip3 install -q --break-system-packages oci requests pyyaml;
           python3 /mkcred.py
       env:
         - name: GIT_PAT

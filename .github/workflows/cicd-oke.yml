@@ -15,10 +15,9 @@ jobs:
     #
     # The OKE runner uses its OWN AIDP git folder: per-instance-principal
     # credential ownership means the OKE node principal can't pull the folder the
-    # VM created (and vice-versa), so each runner owns a distinct folder.
-    env:
-      AIDP_PARENT_DIR: /Workspace/cicd_folder
-      AIDP_FOLDER_PATH: /Workspace/cicd_folder/amit-aidp-cicd-tests-oke
+    # VM created (and vice-versa). `--runner oke` selects the node instance
+    # principal (RUNNER_AUTH) AND the '-oke' folder suffix
+    # (/Workspace/cicd_folder/amit-aidp-cicd-tests-oke) — no env override needed.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,4 +28,4 @@ jobs:
       - name: Preflight imports
         run: python3 -c "import oci, requests, yaml; print('deps ok', oci.__version__)"
       - name: Reconcile AIDP
-        run: python3 deploy/aidp_deploy.py --config deploy/cicd.yaml
+        run: python3 deploy/aidp_deploy.py --config deploy/cicd.yaml --runner oke

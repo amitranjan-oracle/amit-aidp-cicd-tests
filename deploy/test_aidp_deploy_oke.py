@@ -171,9 +171,78 @@ class DerivedConfig(unittest.TestCase):
         try:
             cfg = {"git": {"repository_url": "https://github.com/x/my-repo.git",
                            "parent_dir": "/Workspace/cicd_folder"}}
-            self.assertEqual(A.resolve_folder_path(cfg), "/Workspace/cicd_folder/my-repo-oke")
+            # env override wins for any runner
+            self.assertEqual(A.resolve_folder_path(cfg, "vm"),
+                             "/Workspace/cicd_folder/my-repo-oke")
+            self.assertEqual(A.resolve_folder_path(cfg, "oke"),
+                             "/Workspace/cicd_folder/my-repo-oke")
         finally:
             os.environ.pop("AIDP_FOLDER_PATH", None)
+
+
+class RunnerProfile(unittest.TestCase):
+    def _cfg(self):
+        return {"git": {"repository_url": "https://github.com/x/my-repo.git",
+                        "parent_dir": "/Workspace/cicd_folder"}}
+
+    def test_vm_default_no_suffix(self):
+        import os
+        os.environ.pop("AIDP_FOLDER_PATH", None)
+        self.assertEqual(A.resolve_folder_path(self._cfg()),
+                         "/Workspace/cicd_folder/my-repo")  # default runner == vm
+
+    def test_oke_appends_suffix(self):
+        import os
+        os.environ.pop("AIDP_FOLDER_PATH", None)
+        self.assertEqual(A.resolve_folder_path(self._cfg(), "oke"),
+                         "/Workspace/cicd_folder/my-repo-oke")
+
+    def test_unknown_runner_no_suffix(self):
+        import os
+        os.environ.pop("AIDP_FOLDER_PATH", None)
+        self.assertEqual(A.resolve_folder_path(self._cfg(), "bogus"),
+                         "/Workspace/cicd_folder/my-repo")
+
+    def test_runner_auth_map(self):
+        # Both runners use the host instance principal (WI is unusable for AIDP
+        # volume/list ops); --runner choices are exactly the RUNNER_AUTH keys.
+        self.assertEqual(A.RUNNER_AUTH, {"vm": "instance_principal",
+                                         "oke": "instance_principal"})
+        self.assertEqual(A.RUNNER_FOLDER_SUFFIX, {"vm": "", "oke": "-oke"})
+
+    def test_build_signer_honors_explicit_method(self):
+        # method=None falls back to env selection; an explicit method overrides it.
+        import os
+        captured = {}
+
+        class _FakeOCI:
+            class auth:
+                class signers:
+                    @staticmethod
+                    def get_oke_workload_identity_resource_principal_signer():
+                        captured["m"] = "wi"; return "WI_SIGNER"
+
+                    @staticmethod
+                    def get_resource_principals_signer():
+                        captured["m"] = "rp"; return "RP_SIGNER"
+
+                    class InstancePrincipalsSecurityTokenSigner:
+                        def __init__(self):
+                            captured["m"] = "ip"
+
+        import sys
+        sys.modules["oci"] = _FakeOCI
+        try:
+            # explicit method wins even if env says otherwise
+            os.environ["AIDP_AUTH_METHOD"] = "oke_workload_identity"
+            self.assertEqual(A.build_signer("resource_principal"), "RP_SIGNER")
+            self.assertEqual(captured["m"], "rp")
+            # method=None -> env selection (WI)
+            self.assertEqual(A.build_signer(), "WI_SIGNER")
+            self.assertEqual(captured["m"], "wi")
+        finally:
+            os.environ.pop("AIDP_AUTH_METHOD", None)
+            sys.modules.pop("oci", None)
 
 
 if __name__ == "__main__":

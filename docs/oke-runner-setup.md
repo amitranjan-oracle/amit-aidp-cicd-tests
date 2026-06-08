@@ -20,7 +20,7 @@ the `amit-cicd-compute` VM runner. Verified working end-to-end on 2026-06-08.
 GitHub push/dispatch ─▶ ARC listener (arc-systems) ─▶ ephemeral runner pod (arc-runners)
                                                           │ on the self-managed node
                                                           ▼
-   actions/checkout → setup-python → pip → python deploy/aidp_deploy.py --config deploy/cicd.yaml
+   actions/checkout → setup-python → pip → python deploy/aidp_deploy.py --config deploy/cicd.yaml --runner oke
                                                           │
                                    AIDP auth = NODE INSTANCE PRINCIPAL (via node IMDS)
                                    = DataServices-Compute-DG  (authorized for AIDP volume ops)
@@ -42,8 +42,11 @@ GitHub push/dispatch ─▶ ARC listener (arc-systems) ─▶ ephemeral runner p
 - **Git folder:** the OKE runner uses its **own** folder
   `/Workspace/cicd_folder/amit-aidp-cicd-tests-oke` — per-instance-principal
   credential ownership means the OKE node can't pull the VM's folder (and
-  vice-versa), so each runner owns a distinct folder. Set via the
-  `AIDP_FOLDER_PATH` / `AIDP_PARENT_DIR` env in `cicd-oke.yml`.
+  vice-versa), so each runner owns a distinct folder. This (and the signer) is
+  selected by `aidp_deploy.py --runner oke`: the `oke` profile maps to the node
+  instance principal (`RUNNER_AUTH`) and the `-oke` folder suffix
+  (`RUNNER_FOLDER_SUFFIX`). The VM workflow passes `--runner vm` (no suffix).
+  `AIDP_FOLDER_PATH` still overrides the derived path if ever needed.
 
 ## Findings (why this shape — three dead ends)
 
@@ -63,7 +66,10 @@ GitHub push/dispatch ─▶ ARC listener (arc-systems) ─▶ ephemeral runner p
    OracleIdentityCloudService domain did **not** help (not a domain issue). The
    **node instance principal IS authorized** (verified: `mkdir` → HTTP 409
    "already exists"). ⇒ Use the node instance principal; WI gives no usable
-   advantage for AIDP here.
+   advantage for AIDP here. The WI authz inconsistency (CREATE cluster/job pass,
+   but LIST + volume/git ops deny) is written up for the AIDP team — with
+   reproduction steps and a code-level root-cause hypothesis — in
+   [`aidp-wi-rbac-issue.md`](./aidp-wi-rbac-issue.md).
 
 ## Network / security / access
 

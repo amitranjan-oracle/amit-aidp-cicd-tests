@@ -28,6 +28,17 @@ log = logging.getLogger("aidp-cicd")
 _PREFIX_API_VERSION = {"aiDataPlatforms": "20260430", "dataLakes": "20240831"}
 DEFAULT_API_VERSION = "20260430"
 
+# Per-runner profile. --runner selects BOTH the AIDP signer and the git folder.
+# Both VM and OKE authenticate to AIDP with the host's *instance* principal:
+# OKE Workload Identity authenticates fine but AIDP does NOT authorize WI
+# principals for workspace volume/list ops (see docs/aidp-wi-rbac-issue.md), so
+# the OKE node's instance principal is used — same identity model as the VM.
+# (Change RUNNER_AUTH["oke"] to "oke_workload_identity" if AIDP ever fixes that.)
+RUNNER_AUTH = {"vm": "instance_principal", "oke": "instance_principal"}
+# Distinct folder per runner: per-instance-principal credential ownership means
+# the VM and OKE node can't share one git folder.
+RUNNER_FOLDER_SUFFIX = {"vm": "", "oke": "-oke"}
+
 
 def default_api_version_for(path_prefix: str) -> str:
     """API version paired with *path_prefix* (dataLakes->20240831, aiDataPlatforms->20260430)."""
@@ -51,9 +62,14 @@ REQUIRED_CONFIG_KEYS = [
 ]
 
 
-def resolve_folder_path(cfg: Dict[str, Any]) -> str:
-    """The AIDP git folder path: env AIDP_FOLDER_PATH wins (per-runner override),
-    else git.parent_dir + the repo name parsed from git.repository_url."""
+def resolve_folder_path(cfg: Dict[str, Any], runner: str = "vm") -> str:
+    """The AIDP git folder path: env AIDP_FOLDER_PATH wins (explicit override),
+    else git.parent_dir + the repo name parsed from git.repository_url, with a
+    per-runner suffix so independent runners own distinct folders.
+
+    Per-instance-principal credential ownership means the VM and OKE node can't
+    share one folder (each pull credential is owned by one principal), so the
+    OKE runner gets a '-oke' suffix (e.g. .../amit-aidp-cicd-tests-oke)."""
     import os
     env = os.environ.get("AIDP_FOLDER_PATH")
     if env:
@@ -62,7 +78,8 @@ def resolve_folder_path(cfg: Dict[str, Any]) -> str:
     repo = g["repository_url"].rstrip("/").split("/")[-1]
     if repo.endswith(".git"):
         repo = repo[:-4]
-    return g["parent_dir"].rstrip("/") + "/" + repo
+    base = g["parent_dir"].rstrip("/") + "/" + repo
+    return base + RUNNER_FOLDER_SUFFIX.get(runner, "")
 
 
 def load_config(path: str) -> Dict[str, Any]:
@@ -175,9 +192,10 @@ def select_auth_method(env: Dict[str, str]) -> str:
     return "instance_principal"
 
 
-def build_signer():
-    """Build an OCI signer per select_auth_method(); all subclass
-    requests.auth.AuthBase so they plug into requests as auth=.
+def build_signer(method: Optional[str] = None):
+    """Build an OCI signer for *method* (an explicit auth method, e.g. selected by
+    --runner via RUNNER_AUTH); when None, fall back to select_auth_method(env).
+    All signers subclass requests.auth.AuthBase so they plug into requests as auth=.
     Raises RuntimeError with a clear message if none is available.
     """
     import os
@@ -186,7 +204,8 @@ def build_signer():
     except ImportError as exc:
         raise RuntimeError(
             "oci SDK not importable ({}); run this where oci is installed.".format(exc))
-    method = select_auth_method(os.environ)
+    if method is None:
+        method = select_auth_method(os.environ)
     if method == "oke_workload_identity":
         log.info("Using OKE workload-identity signer.")
         return oci.auth.signers.get_oke_workload_identity_resource_principal_signer()
@@ -265,6 +284,7 @@ class AidpClient:
         self.poll_interval = int(cfg.get("options", {}).get("poll_interval_secs", 5))
         self.dry_run = dry_run
         self.offline = signer is None   # no principal -> validate-only (off-box dry-run)
+        self.runner = "vm"              # set by run() from --runner; drives the folder suffix
 
     # ---- URL helpers ----
     def lake_url(self, *parts: str) -> str:
@@ -559,7 +579,7 @@ def phase1_directory(client: "AidpClient", cfg: Dict[str, Any]) -> None:
 def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 2: git folder (create or pull) ==")
     g = cfg["git"]
-    fp = resolve_folder_path(cfg)  # derived: parent_dir + repo name (or AIDP_FOLDER_PATH)
+    fp = resolve_folder_path(cfg, client.runner)  # parent_dir + repo (+ runner suffix), or AIDP_FOLDER_PATH
     if client.offline:
         log.info("[offline dry-run] would create-or-pull git folder %s (%s@%s)",
                  fp, g["repository_url"], g["branch"]); return
@@ -621,15 +641,15 @@ def phase4_job(client: "AidpClient", cfg: Dict[str, Any]) -> None:
         client.update_job(found["key"], {**current, **desired_keyed})
 
 
-def _build_signer_with_timeout(timeout_secs: float):
-    """Call build_signer() in a daemon thread; return (signer, None) on success
-    or (None, exc_str) if it raises or times out within *timeout_secs*."""
+def _build_signer_with_timeout(timeout_secs: float, method: Optional[str] = None):
+    """Call build_signer(method) in a daemon thread; return (signer, None) on
+    success or (None, exc_str) if it raises or times out within *timeout_secs*."""
     import threading
     result: list = []
 
     def _target():
         try:
-            result.append(("ok", build_signer()))
+            result.append(("ok", build_signer(method)))
         except Exception as exc:  # noqa: BLE001
             result.append(("err", str(exc)))
 
@@ -644,23 +664,27 @@ def _build_signer_with_timeout(timeout_secs: float):
     return None, val
 
 
-def run(cfg: Dict[str, Any], dry_run: bool) -> None:
+def run(cfg: Dict[str, Any], dry_run: bool, runner: str = "vm") -> None:
+    # The runner profile selects the AIDP signer (RUNNER_AUTH) and git folder.
+    method = RUNNER_AUTH.get(runner, "instance_principal")
+    log.info("Runner profile: %s (auth=%s)", runner, method)
     # Always try for a signer. On-box (incl. dry-run) we get one and make real
     # read-only decisions. Off-box dry-run tolerates no principal -> offline.
     signer = None
     try:
         if dry_run:
             # Cap the IMDS probe at 5 s so off-box dry-runs don't hang.
-            signer, err = _build_signer_with_timeout(5)
+            signer, err = _build_signer_with_timeout(5, method)
             if signer is None:
                 raise RuntimeError(err)
         else:
-            signer = build_signer()
+            signer = build_signer(method)
     except RuntimeError as exc:
         if not dry_run:
             raise
         log.warning("No OCI principal (%s); offline dry-run: config/specs only.", exc)
     client = AidpClient(cfg, signer, dry_run=dry_run)
+    client.runner = runner
     phase0_credential(client, cfg)
     phase1_directory(client, cfg)
     phase2_git_folder(client, cfg)
@@ -672,6 +696,9 @@ def run(cfg: Dict[str, Any], dry_run: bool) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="AIDP CI/CD reconcile")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--runner", choices=sorted(RUNNER_AUTH), default="vm",
+                        help="Which runner this executes on (vm|oke); selects the "
+                             "AIDP signer (RUNNER_AUTH) and the git folder suffix.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate + log intended actions; mutate nothing.")
     args = parser.parse_args(argv)
@@ -680,7 +707,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg = load_config(args.config)
     if args.dry_run:
         log.info("DRY RUN — no mutations will be made.")
-    run(cfg, dry_run=args.dry_run)
+    run(cfg, dry_run=args.dry_run, runner=args.runner)
     return 0
 
 
