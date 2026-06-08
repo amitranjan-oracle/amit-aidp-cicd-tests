@@ -7,9 +7,11 @@ import aidp_deploy as A
 
 
 class _Resp:
-    def __init__(self, payload, headers=None):
+    def __init__(self, payload, headers=None, status_code=200, text=""):
         self._payload = payload
         self.headers = headers or {}
+        self.status_code = status_code
+        self.text = text
 
     def json(self):
         return self._payload
@@ -295,6 +297,92 @@ class ListAllPagination(unittest.TestCase):
         # a stray opc-next-page with an empty page must not loop forever
         client.request_ok = lambda *a, **k: _Resp({"items": []}, {"opc-next-page": "Z"})
         self.assertEqual(client.list_all("http://x"), [])
+
+
+class EnsureDirectory(unittest.TestCase):
+    def test_created_returns_true(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=201)
+        self.assertTrue(client.ensure_directory("/Workspace/x"))
+
+    def test_already_exists_returns_false(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
+        self.assertFalse(client.ensure_directory("/Workspace/x"))
+
+
+class CreateConflictTolerance(unittest.TestCase):
+    def test_cluster_409_adopts_and_updates(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=409, text="path already exists")
+        client.find_cluster_by_name = lambda name: {"key": "K"}
+        client.get_cluster = lambda key: {"key": "K", "displayName": "c", "old": 1}
+        captured = {}
+        client.update_cluster = lambda key, body: captured.update(key=key, body=body)
+        client.create_cluster({"displayName": "c", "new": 2})
+        self.assertEqual(captured["key"], "K")
+        # update body is {**live, **spec}
+        self.assertEqual(captured["body"], {"key": "K", "displayName": "c", "old": 1, "new": 2})
+
+    def test_cluster_409_not_findable_raises(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
+        client.find_cluster_by_name = lambda name: None
+        with self.assertRaises(RuntimeError):
+            client.create_cluster({"displayName": "c"})
+
+    def test_job_409_adopts_and_updates(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
+        client.find_job_by_name = lambda name: {"key": "J"}
+        client.get_job = lambda key: {"key": "J", "name": "j", "tasks": [1]}
+        captured = {}
+        client.update_job = lambda key, body: captured.update(key=key, body=body)
+        client.create_job({"name": "j", "jobClusters": [2]})
+        self.assertEqual(captured["key"], "J")
+        self.assertEqual(captured["body"], {"key": "J", "name": "j", "tasks": [1], "jobClusters": [2]})
+
+    def test_job_409_not_findable_raises(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
+        client.find_job_by_name = lambda name: None
+        with self.assertRaises(RuntimeError):
+            client.create_job({"name": "j"})
+
+    def test_create_git_folder_409_raises_actionable(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
+        with self.assertRaises(RuntimeError) as ctx:
+            client.create_git_folder("/Workspace/x/repo", "https://h/r.git", "main", "CK")
+        self.assertIn("STALE", str(ctx.exception))
+
+
+class Phase2StaleAssociationGuard(unittest.TestCase):
+    def _client_for_phase2(self, parent_was_absent):
+        client, cfg = _client()
+        cfg["git"]["repository_url"] = "https://github.com/x/repo.git"
+        cfg["git"]["parent_dir"] = "/Workspace/cicd_test"
+        cfg["git"]["branch"] = "main"
+        client.offline = False
+        client.runner = "vm"
+        client.parent_was_absent = parent_was_absent
+        client.git_folder_metadata = lambda fp: {"isAssociated": True, "repoKey": "R"}
+        client.resolve_git_credential_key = lambda c: "CK"
+        client.wait_for_async = lambda k: None
+        self.calls = []
+        client.git_pull = lambda *a, **k: self.calls.append("pull")
+        client.create_git_folder = lambda *a, **k: self.calls.append("clone")
+        return client, cfg
+
+    def test_associated_but_parent_absent_clones(self):
+        client, cfg = self._client_for_phase2(parent_was_absent=True)
+        A.phase2_git_folder(client, cfg)
+        self.assertEqual(self.calls, ["clone"])  # stale association -> clone, not pull
+
+    def test_associated_and_parent_existed_pulls(self):
+        client, cfg = self._client_for_phase2(parent_was_absent=False)
+        A.phase2_git_folder(client, cfg)
+        self.assertEqual(self.calls, ["pull"])  # healthy association -> pull
 
 
 if __name__ == "__main__":

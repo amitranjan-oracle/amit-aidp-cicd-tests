@@ -285,6 +285,7 @@ class AidpClient:
         self.dry_run = dry_run
         self.offline = signer is None   # no principal -> validate-only (off-box dry-run)
         self.runner = "vm"              # set by run() from --runner; drives the folder suffix
+        self.parent_was_absent = False  # set by phase1; Phase 2 stale-association guard
 
     # ---- URL helpers ----
     def lake_url(self, *parts: str) -> str:
@@ -431,19 +432,23 @@ class AidpClient:
         return key
 
     # ---- Phase 1: directory ----
-    def ensure_directory(self, path: str) -> None:
+    def ensure_directory(self, path: str) -> bool:
+        """Create the directory. Return True if it was newly created, False if it
+        already existed — callers use this to tell a fresh tree from an existing
+        one (Phase 2 uses it to detect a stale git association)."""
         if self.dry_run:
-            log.info("[dry-run] mkdir %s", path); return
+            log.info("[dry-run] mkdir %s", path); return False
         resp = self.request("POST", self.ws_url("actions", "mkdir"),
                             body={"path": path, "description": None})
         if resp.status_code in (200, 201, 204):
             log.info("created directory %s", path)
-        elif resp.status_code == 409 or (resp.status_code == 400
+            return True
+        if resp.status_code == 409 or (resp.status_code == 400
                 and "exist" in (resp.text or "").lower()):
             log.info("directory %s already exists", path)
-        else:
-            raise RuntimeError("mkdir {} -> HTTP {}: {}".format(
-                path, resp.status_code, resp.text))
+            return False
+        raise RuntimeError("mkdir {} -> HTTP {}: {}".format(
+            path, resp.status_code, resp.text))
 
     # ---- Phase 2: git folder ----
     def git_folder_metadata(self, folder_path: str) -> Dict[str, Any]:
@@ -457,10 +462,24 @@ class AidpClient:
         if self.dry_run:
             log.info("[dry-run] create git folder %s -> %s@%s", folder_path,
                      repo_url, branch); return None
-        resp = self.request_ok("POST", self.ws_url("gitFolders"), body={
+        resp = self.request("POST", self.ws_url("gitFolders"), body={
             "folderPath": _ws_relpath(folder_path), "gitRepositoryUrl": repo_url,
             "branchName": branch, "credentialKey": credential_key,
             "description": None, "gitProviderKey": None})
+        if resp.status_code == 409 or (resp.status_code == 400
+                and "exist" in (resp.text or "").lower()):
+            # A clone onto an already-associated path: almost always AIDP's stale
+            # git association (folder gone but GIT_REPO record remains — see
+            # docs/aidp-git-folder-issue.md). Fail with an actionable message
+            # rather than a cryptic 409.
+            raise RuntimeError(
+                "create git folder {} -> HTTP {}: path already associated/exists. "
+                "Likely a STALE git association (docs/aidp-git-folder-issue.md): remove "
+                "the gitRepository server-side, or point git.parent_dir at a fresh path. "
+                "Body: {}".format(folder_path, resp.status_code, resp.text))
+        if resp.status_code not in (200, 201, 202, 204):
+            raise RuntimeError("create git folder {} -> HTTP {}: {} (opc-request-id={})".format(
+                folder_path, resp.status_code, resp.text, resp.headers.get("opc-request-id")))
         log.info("created git folder %s (cloning async)", folder_path)
         return _async_key(resp)
 
@@ -532,7 +551,27 @@ class AidpClient:
     def create_cluster(self, spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if self.dry_run:
             log.info("[dry-run] create cluster %s", spec.get("displayName")); return None
-        resp = self.request_ok("POST", self.ws_url("clusters"), body=spec)
+        name = spec.get("displayName")
+        resp = self.request("POST", self.ws_url("clusters"), body=spec)
+        if resp.status_code == 409 or (resp.status_code == 400
+                and "exist" in (resp.text or "").lower()):
+            # CREATE conflicted with an existing object. With pagination this is
+            # rare, but a true orphan (object exists yet unlisted) can still cause
+            # it. Re-resolve by name and UPDATE in place rather than hard-failing.
+            log.warning("create cluster %s -> HTTP %s already exists; re-resolving + updating",
+                        name, resp.status_code)
+            found = self.find_cluster_by_name(name)
+            if not found:
+                raise RuntimeError(
+                    "cluster {} returned HTTP {} 'already exists' but is not findable by "
+                    "name (orphaned object — needs manual cleanup). Body: {}".format(
+                        name, resp.status_code, resp.text))
+            live = self.get_cluster(found["key"])
+            self.update_cluster(found["key"], {**live, **spec})
+            return live
+        if resp.status_code not in (200, 201, 202, 204):
+            raise RuntimeError("create cluster {} -> HTTP {}: {} (opc-request-id={})".format(
+                name, resp.status_code, resp.text, resp.headers.get("opc-request-id")))
         self._wait_if_async(resp)
         try:
             created = resp.json()
@@ -570,9 +609,27 @@ class AidpClient:
     def create_job(self, spec: Dict[str, Any]) -> None:
         if self.dry_run:
             log.info("[dry-run] create job %s", spec.get("name")); return
-        resp = self.request_ok("POST", self.ws_url("jobs"), body=spec)
+        name = spec.get("name")
+        resp = self.request("POST", self.ws_url("jobs"), body=spec)
+        if resp.status_code == 409 or (resp.status_code == 400
+                and "exist" in (resp.text or "").lower()):
+            # See create_cluster: adopt + update on conflict instead of failing.
+            log.warning("create job %s -> HTTP %s already exists; re-resolving + updating",
+                        name, resp.status_code)
+            found = self.find_job_by_name(name)
+            if not found:
+                raise RuntimeError(
+                    "job {} returned HTTP {} 'already exists' but is not findable by name "
+                    "(orphaned object — needs manual cleanup). Body: {}".format(
+                        name, resp.status_code, resp.text))
+            current = self.get_job(found["key"])
+            self.update_job(found["key"], {**current, **spec})
+            return
+        if resp.status_code not in (200, 201, 202, 204):
+            raise RuntimeError("create job {} -> HTTP {}: {} (opc-request-id={})".format(
+                name, resp.status_code, resp.text, resp.headers.get("opc-request-id")))
         self._wait_if_async(resp)
-        log.info("created job %s", spec.get("name"))
+        log.info("created job %s", name)
 
     def update_job(self, key: str, body: Dict[str, Any]) -> None:
         if self.dry_run:
@@ -591,7 +648,10 @@ def phase0_credential(client: "AidpClient", cfg: Dict[str, Any]) -> None:
 
 def phase1_directory(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 1: ensure directory ==")
-    client.ensure_directory(cfg["git"]["parent_dir"])
+    # Remember whether the parent was freshly created — Phase 2 uses it to spot
+    # a stale git association (if the parent didn't exist, no git folder under it
+    # can exist, so any isAssociated=true is stale).
+    client.parent_was_absent = client.ensure_directory(cfg["git"]["parent_dir"])
 
 
 def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
@@ -602,7 +662,17 @@ def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
         log.info("[offline dry-run] would create-or-pull git folder %s (%s@%s)",
                  fp, g["repository_url"], g["branch"]); return
     meta = client.git_folder_metadata(fp)
-    if meta.get("isAssociated") and meta.get("repoKey"):
+    associated = bool(meta.get("isAssociated") and meta.get("repoKey"))
+    # Re-clone guard for AIDP's stale-association bug (docs/aidp-git-folder-issue.md):
+    # if the parent dir was just created, the git folder under it cannot exist, so
+    # an isAssociated=true is provably STALE. Pulling would leave a regular, partial
+    # folder — clone instead (create_git_folder raises a clear error if the stale
+    # association still blocks the clone).
+    if associated and client.parent_was_absent:
+        log.warning("git folder %s reports associated, but its parent was just created "
+                    "-> stale association (docs/aidp-git-folder-issue.md); cloning instead", fp)
+        associated = False
+    if associated:
         log.info("git folder exists; pulling %s", g["branch"])
         client.wait_for_async(client.git_pull(meta["repoKey"], fp, g["branch"]))
     else:
