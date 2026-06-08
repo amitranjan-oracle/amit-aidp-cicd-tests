@@ -311,44 +311,7 @@ class EnsureDirectory(unittest.TestCase):
         self.assertFalse(client.ensure_directory("/Workspace/x"))
 
 
-class CreateConflictTolerance(unittest.TestCase):
-    def test_cluster_409_adopts_and_updates(self):
-        client, _ = _client()
-        client.request = lambda *a, **k: _Resp({}, status_code=409, text="path already exists")
-        client.find_cluster_by_name = lambda name: {"key": "K"}
-        client.get_cluster = lambda key: {"key": "K", "displayName": "c", "old": 1}
-        captured = {}
-        client.update_cluster = lambda key, body: captured.update(key=key, body=body)
-        client.create_cluster({"displayName": "c", "new": 2})
-        self.assertEqual(captured["key"], "K")
-        # update body is {**live, **spec}
-        self.assertEqual(captured["body"], {"key": "K", "displayName": "c", "old": 1, "new": 2})
-
-    def test_cluster_409_not_findable_raises(self):
-        client, _ = _client()
-        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
-        client.find_cluster_by_name = lambda name: None
-        with self.assertRaises(RuntimeError):
-            client.create_cluster({"displayName": "c"})
-
-    def test_job_409_adopts_and_updates(self):
-        client, _ = _client()
-        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
-        client.find_job_by_name = lambda name: {"key": "J"}
-        client.get_job = lambda key: {"key": "J", "name": "j", "tasks": [1]}
-        captured = {}
-        client.update_job = lambda key, body: captured.update(key=key, body=body)
-        client.create_job({"name": "j", "jobClusters": [2]})
-        self.assertEqual(captured["key"], "J")
-        self.assertEqual(captured["body"], {"key": "J", "name": "j", "tasks": [1], "jobClusters": [2]})
-
-    def test_job_409_not_findable_raises(self):
-        client, _ = _client()
-        client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
-        client.find_job_by_name = lambda name: None
-        with self.assertRaises(RuntimeError):
-            client.create_job({"name": "j"})
-
+class CreateGitFolderConflict(unittest.TestCase):
     def test_create_git_folder_409_raises_actionable(self):
         client, _ = _client()
         client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
@@ -357,11 +320,42 @@ class CreateConflictTolerance(unittest.TestCase):
         self.assertIn("STALE", str(ctx.exception))
 
 
+class BundleDeploy(unittest.TestCase):
+    def test_deploy_bundle_posts_to_actions_deploy(self):
+        client, _ = _client()
+        seen = {}
+
+        def fake_ok(method, url, body=None, params=None, **k):
+            seen.update(method=method, url=url, body=body)
+            return _Resp({}, status_code=202)  # no async-key header -> no wait
+
+        client.request_ok = fake_ok
+        client.deploy_bundle("/Workspace/x/bundle")
+        self.assertEqual(seen["method"], "POST")
+        self.assertTrue(seen["url"].endswith("/bundles/actions/deploy"))
+        self.assertEqual(seen["body"], {"path": "/Workspace/x/bundle"})
+
+    def test_phase3_builds_bundle_path_and_deploys(self):
+        import os
+        os.environ.pop("AIDP_FOLDER_PATH", None)
+        client, cfg = _client()
+        cfg["git"]["repository_url"] = "https://github.com/x/repo.git"
+        cfg["git"]["parent_dir"] = "/Workspace/cicd_test_01"
+        cfg["git"]["bundle_path"] = "bundle"
+        client.offline = False
+        client.runner = "vm"
+        seen = []
+        client.deploy_bundle = lambda p: seen.append(p)
+        A.phase3_bundle(client, cfg)
+        # <parent_dir>/<repo>/<bundle_path>
+        self.assertEqual(seen, ["/Workspace/cicd_test_01/repo/bundle"])
+
+
 class Phase2StaleAssociationGuard(unittest.TestCase):
     def _client_for_phase2(self, parent_was_absent):
         client, cfg = _client()
         cfg["git"]["repository_url"] = "https://github.com/x/repo.git"
-        cfg["git"]["parent_dir"] = "/Workspace/cicd_test"
+        cfg["git"]["parent_dir"] = "/Workspace/cicd_test_01"
         cfg["git"]["branch"] = "main"
         client.offline = False
         client.runner = "vm"

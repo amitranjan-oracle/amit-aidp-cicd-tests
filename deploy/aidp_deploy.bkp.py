@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""AIDP CI/CD bundle-deploy script.
+"""AIDP CI/CD reconcile script.
 
-Runs on the self-hosted runner under the box's instance principal. Reads
-deploy/cicd.yaml and:
-  Phase 0  ensure the GIT_ACCOUNT user-setting (create from the OCI secret if absent)
-  Phase 1  ensure the workspace git.parent_dir exists
-  Phase 2  clone the git repo into it (or pull if present); ensure the folder is
-           bound to the running principal's credential (re-associate if not)
-  Phase 3  deploy the AIDP bundle at git.bundle_path — which creates/updates the
-           bundle's own compute + workflow
+Runs on amit-cicd-compute (Python 3.9) under the box's instance principal.
+Reads deploy/cicd.yaml + specs/*.json and brings AIDP to desired state:
+  Phase 0  ensure the GIT_ACCOUNT user-setting (create from OCI secret if absent)
+  Phase 1  ensure /Workspace/cicd_folder
+  Phase 2  git folder clone (create) or pull main
+  Phase 3  reconcile compute cluster cicd_01
+  Phase 4  reconcile workflow job cicd_workflow_job (cluster key injected)
 Only oci + requests + yaml + stdlib. Python 3.9 compatible.
 """
 
@@ -47,16 +46,19 @@ def default_api_version_for(path_prefix: str) -> str:
 
 
 # Required config keys. Other values are DERIVED, not configured:
-#   aidp.api_version   <- default_api_version_for(path_prefix) [override optional]
-#   git.folder_path    <- parent_dir + repo name (from repository_url) [AIDP_FOLDER_PATH override]
-#   bundle deploy path <- git folder path + "/" + git.bundle_path
+#   aidp.api_version      <- default_api_version_for(path_prefix) [override optional]
+#   git.folder_path       <- parent_dir + repo name (from repository_url) [AIDP_FOLDER_PATH override]
+#   compute.name          <- compute spec's displayName
+#   workflow.name         <- workflow spec's name
+#   workflow.cluster_name <- workflow spec's jobClusters[].clusterName
 REQUIRED_CONFIG_KEYS = [
     ("aidp", "region"), ("aidp", "data_lake_ocid"), ("aidp", "path_prefix"),
     ("aidp", "workspace_key"),
     ("git", "repository_url"), ("git", "branch"),
     ("git", "credential_name"), ("git", "credential_secret_id"),
     ("git", "credential_username"), ("git", "parent_dir"),
-    ("git", "bundle_path"),
+    ("compute", "spec_file"),
+    ("workflow", "spec_file"),
 ]
 
 
@@ -103,6 +105,79 @@ def load_config(path: str) -> Dict[str, Any]:
     if missing:
         raise ValueError("Missing required config keys: " + ", ".join(missing))
     return cfg
+
+
+def load_spec(path: str) -> Dict[str, Any]:
+    """Load a JSON desired-state spec file."""
+    with open(path) as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Invalid JSON in spec {}: {}".format(path, exc)) from exc
+
+
+def satisfies(desired: Any, live: Any) -> bool:
+    """True if every value declared in `desired` is present/equal in `live`.
+
+    Extra keys in `live` are ignored (declarative subset semantics), so
+    server-defaulted fields never trigger a false 'differs'.
+    """
+    if isinstance(desired, dict):
+        if not isinstance(live, dict):
+            return False
+        return all(k in live and satisfies(v, live[k]) for k, v in desired.items())
+    if isinstance(desired, list):
+        if not isinstance(live, list) or len(desired) != len(live):
+            return False
+        return all(satisfies(dv, lv) for dv, lv in zip(desired, live))
+    return desired == live
+
+
+def _strip_cluster_keys(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-copy a job and drop volatile clusterKey from all cluster refs."""
+    j = json.loads(json.dumps(job))
+    for jc in (j.get("jobClusters") or []):
+        jc.pop("clusterKey", None)
+    for t in (j.get("tasks") or []):
+        c = t.get("cluster")
+        if isinstance(c, dict):
+            c.pop("clusterKey", None)
+    return j
+
+
+def _sort_job_lists(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-copy a job and sort its tasks/jobClusters so comparison is order-independent."""
+    j = json.loads(json.dumps(job))
+    if isinstance(j.get("tasks"), list):
+        j["tasks"] = sorted(j["tasks"], key=lambda t: t.get("taskKey") or "")
+    if isinstance(j.get("jobClusters"), list):
+        j["jobClusters"] = sorted(j["jobClusters"], key=lambda c: c.get("clusterName") or "")
+    return j
+
+
+def cluster_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
+    """Cluster reconcile check — pure subset (volatile fields aren't in desired)."""
+    return satisfies(desired, live)
+
+
+def job_in_sync(desired: Dict[str, Any], live: Dict[str, Any]) -> bool:
+    """Job reconcile check — clusterKey stripped (match by name), order-independent."""
+    d = _sort_job_lists(_strip_cluster_keys(desired))
+    l = _sort_job_lists(_strip_cluster_keys(live))
+    d.pop("path", None)  # server normalizes path inconsistently (create vs update) — not a real diff
+    return satisfies(d, l)
+
+
+def inject_cluster_key(job_spec: Dict[str, Any], cluster_key: str) -> Dict[str, Any]:
+    """Return a deep copy of the job spec with clusterKey set on every cluster ref."""
+    j = json.loads(json.dumps(job_spec))
+    for jc in (j.get("jobClusters") or []):
+        jc["clusterKey"] = cluster_key
+    for t in (j.get("tasks") or []):
+        c = t.get("cluster")
+        if isinstance(c, dict):
+            c["clusterKey"] = cluster_key
+    return j
 
 
 def select_auth_method(env: Dict[str, str]) -> str:
@@ -475,17 +550,125 @@ class AidpClient:
         if key:
             self.wait_for_async(key)
 
-    # ---- Phase 3: bundle deploy ----
-    def deploy_bundle(self, bundle_path: str) -> None:
-        """Deploy the AIDP bundle at *bundle_path* (POST .../bundles/actions/deploy,
-        async). The bundle definition creates/updates its own compute + workflow,
-        so this reconcile no longer manages clusters/jobs individually."""
+    # ---- Phase 3: clusters ----
+    def list_clusters(self) -> List[Dict[str, Any]]:
+        return self.list_all(self.ws_url("clusters"))
+
+    def find_cluster_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        for c in self.list_clusters():
+            if c.get("displayName") == name:
+                return c
+        return None
+
+    def get_cluster(self, key: str) -> Dict[str, Any]:
+        return self.request_ok("GET", self.ws_url("clusters", key)).json()
+
+    def wait_for_cluster_active(self, key: str) -> Dict[str, Any]:
+        """Poll the cluster until it reports ACTIVE (create/restart provisioning
+        completes). Raise on FAILED, or TimeoutError past poll_timeout."""
+        deadline = time.time() + self.poll_timeout
+        while True:
+            c = self.get_cluster(key)
+            state = c.get("state") or c.get("lifecycleState")
+            log.info("cluster %s state=%s", key, state)
+            if state == "ACTIVE":
+                return c
+            if state == "FAILED":
+                raise RuntimeError("cluster {} entered FAILED: {}".format(
+                    key, c.get("stateDetails")))
+            if time.time() > deadline:
+                raise TimeoutError("cluster {} still {} after {}s".format(
+                    key, state, self.poll_timeout))
+            time.sleep(self.poll_interval)
+
+    def create_cluster(self, spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if self.dry_run:
-            log.info("[dry-run] deploy bundle %s", bundle_path); return
-        resp = self.request_ok("POST", self.ws_url("bundles", "actions", "deploy"),
-                               body={"path": bundle_path})
+            log.info("[dry-run] create cluster %s", spec.get("displayName")); return None
+        name = spec.get("displayName")
+        resp = self.request("POST", self.ws_url("clusters"), body=spec)
+        if resp.status_code == 409 or (resp.status_code == 400
+                and "exist" in (resp.text or "").lower()):
+            # CREATE conflicted with an existing object. With pagination this is
+            # rare, but a true orphan (object exists yet unlisted) can still cause
+            # it. Re-resolve by name and UPDATE in place rather than hard-failing.
+            log.warning("create cluster %s -> HTTP %s already exists; re-resolving + updating",
+                        name, resp.status_code)
+            found = self.find_cluster_by_name(name)
+            if not found:
+                raise RuntimeError(
+                    "cluster {} returned HTTP {} 'already exists' but is not findable by "
+                    "name (orphaned object — needs manual cleanup). Body: {}".format(
+                        name, resp.status_code, resp.text))
+            live = self.get_cluster(found["key"])
+            self.update_cluster(found["key"], {**live, **spec})
+            return live
+        if resp.status_code not in (200, 201, 202, 204):
+            raise RuntimeError("create cluster {} -> HTTP {}: {} (opc-request-id={})".format(
+                name, resp.status_code, resp.text, resp.headers.get("opc-request-id")))
         self._wait_if_async(resp)
-        log.info("deployed bundle %s", bundle_path)
+        try:
+            created = resp.json()
+        except ValueError:
+            created = {}
+        key = created.get("key")
+        if not key:  # response didn't echo the key — resolve by name
+            found = self.find_cluster_by_name(spec.get("displayName"))
+            key = found.get("key") if found else None
+        log.info("created cluster %s (key=%s); waiting for ACTIVE", spec.get("displayName"), key)
+        if key:
+            self.wait_for_cluster_active(key)
+        return created
+
+    def update_cluster(self, key: str, body: Dict[str, Any]) -> None:
+        if self.dry_run:
+            log.info("[dry-run] update cluster %s", key); return
+        self._wait_if_async(self.request_ok("PUT", self.ws_url("clusters", key), body=body))
+        log.info("updated cluster %s; waiting for ACTIVE", key)
+        self.wait_for_cluster_active(key)
+
+    # ---- Phase 4: jobs ----
+    def list_jobs(self) -> List[Dict[str, Any]]:
+        return self.list_all(self.ws_url("jobs"))
+
+    def find_job_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        for j in self.list_jobs():
+            if j.get("name") == name:
+                return j
+        return None
+
+    def get_job(self, key: str) -> Dict[str, Any]:
+        return self.request_ok("GET", self.ws_url("jobs", key)).json()
+
+    def create_job(self, spec: Dict[str, Any]) -> None:
+        if self.dry_run:
+            log.info("[dry-run] create job %s", spec.get("name")); return
+        name = spec.get("name")
+        resp = self.request("POST", self.ws_url("jobs"), body=spec)
+        if resp.status_code == 409 or (resp.status_code == 400
+                and "exist" in (resp.text or "").lower()):
+            # See create_cluster: adopt + update on conflict instead of failing.
+            log.warning("create job %s -> HTTP %s already exists; re-resolving + updating",
+                        name, resp.status_code)
+            found = self.find_job_by_name(name)
+            if not found:
+                raise RuntimeError(
+                    "job {} returned HTTP {} 'already exists' but is not findable by name "
+                    "(orphaned object — needs manual cleanup). Body: {}".format(
+                        name, resp.status_code, resp.text))
+            current = self.get_job(found["key"])
+            self.update_job(found["key"], {**current, **spec})
+            return
+        if resp.status_code not in (200, 201, 202, 204):
+            raise RuntimeError("create job {} -> HTTP {}: {} (opc-request-id={})".format(
+                name, resp.status_code, resp.text, resp.headers.get("opc-request-id")))
+        self._wait_if_async(resp)
+        log.info("created job %s", name)
+
+    def update_job(self, key: str, body: Dict[str, Any]) -> None:
+        if self.dry_run:
+            log.info("[dry-run] update job %s", key); return
+        self._wait_if_async(self.request_ok("PUT", self.ws_url("jobs", key), body=body))
+        log.info("updated job %s", key)
 
 
 def phase0_credential(client: "AidpClient", cfg: Dict[str, Any]) -> None:
@@ -536,15 +719,51 @@ def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
             fp, g["repository_url"], g["branch"], cred_key))
 
 
-def phase3_bundle(client: "AidpClient", cfg: Dict[str, Any]) -> None:
-    log.info("== Phase 3: deploy bundle ==")
-    g = cfg["git"]
-    # The bundle lives inside the cloned git folder at git.bundle_path.
-    fp = resolve_folder_path(cfg, client.runner)
-    bundle_path = fp.rstrip("/") + "/" + g["bundle_path"].strip("/")
+def phase3_compute(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+    log.info("== Phase 3: reconcile compute ==")
+    desired = load_spec(cfg["compute"]["spec_file"])
+    name = desired.get("displayName")  # derived from the spec (not duplicated in config)
     if client.offline:
-        log.info("[offline dry-run] would deploy bundle %s", bundle_path); return
-    client.deploy_bundle(bundle_path)
+        log.info("[offline dry-run] validated spec for cluster %s; skipping live check", name); return
+    found = client.find_cluster_by_name(name)
+    if found is None:
+        log.info("cluster %s absent -> CREATE", name)
+        client.create_cluster(desired)
+        return
+    live = client.get_cluster(found["key"])  # full repr — the list view summarizes config
+    if cluster_in_sync(desired, live):
+        log.info("cluster %s already in sync -> NO-OP", name)
+    else:
+        log.info("cluster %s differs -> UPDATE", name)
+        client.update_cluster(found["key"], {**live, **desired})
+
+
+def phase4_job(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+    log.info("== Phase 4: reconcile job ==")
+    desired = load_spec(cfg["workflow"]["spec_file"])
+    name = desired.get("name")  # derived from the spec
+    jobclusters = desired.get("jobClusters") or []
+    cluster_name = jobclusters[0].get("clusterName") if jobclusters else None  # cluster the job binds to
+    if client.offline:
+        log.info("[offline dry-run] validated spec for job %s; skipping live check", name); return
+    if not cluster_name:
+        raise RuntimeError("job spec {} has no jobClusters[].clusterName to bind".format(
+            cfg["workflow"]["spec_file"]))
+    cluster = client.find_cluster_by_name(cluster_name)
+    if cluster is None:
+        raise RuntimeError("cluster {} not found; Phase 3 must create it first".format(cluster_name))
+    desired_keyed = inject_cluster_key(desired, cluster["key"])
+    found = client.find_job_by_name(name)
+    if found is None:
+        log.info("job %s absent -> CREATE", name)
+        client.create_job(desired_keyed)
+        return
+    current = client.get_job(found["key"])  # full repr for an accurate diff
+    if job_in_sync(desired, current):
+        log.info("job %s already in sync -> NO-OP", name)
+    else:
+        log.info("job %s differs -> UPDATE", name)
+        client.update_job(found["key"], {**current, **desired_keyed})
 
 
 def _build_signer_with_timeout(timeout_secs: float, method: Optional[str] = None):
@@ -588,13 +807,14 @@ def run(cfg: Dict[str, Any], dry_run: bool, runner: str = "vm") -> None:
     except RuntimeError as exc:
         if not dry_run:
             raise
-        log.warning("No OCI principal (%s); offline dry-run: config only.", exc)
+        log.warning("No OCI principal (%s); offline dry-run: config/specs only.", exc)
     client = AidpClient(cfg, signer, dry_run=dry_run)
     client.runner = runner
     phase0_credential(client, cfg)
     phase1_directory(client, cfg)
     phase2_git_folder(client, cfg)
-    phase3_bundle(client, cfg)
+    phase3_compute(client, cfg)
+    phase4_job(client, cfg)
     log.info("== Done ==")
 
 
