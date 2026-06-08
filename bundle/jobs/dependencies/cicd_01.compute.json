@@ -30,5 +30,5 @@
     "sparkEnvVariables" : { }
   },
   "loggingConfig" : null,
-  "autoTerminationMinutes" : 10
+  "autoTerminationMinutes" : 30
 }
