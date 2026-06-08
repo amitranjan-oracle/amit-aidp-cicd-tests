@@ -260,6 +260,26 @@ Equivalently in one line: if a `dh-user-principal`-style enrichment is what make
 the working operations work, propagate it to **all** workspace operations
 (including LIST, git pull, and `mkdir`), not just CREATE / `gitFolderMetadata`.
 
+### Why a client-supplied `dh-user-principal` is NOT a workaround
+
+`getPrimaryPrincipal()` does honor a `dh-user-principal` header, and
+`getPrincipalFromBase64()` **blindly decodes** it (`Base64.decode →
+principalSerializer.deserialize`, no signature check at that layer). But a client
+setting it is not a viable fix:
+
+1. **`mkdir` doesn't read it.** `WorkspaceObjectResource.mkdir` (`:691`) never calls
+   `getPrimaryPrincipal` — it passes the raw principal to the Lake volume handler.
+   The reconcile's first data-plane op is `mkdir`, so the header can't unblock it.
+2. **It's an internal impersonation/forwarding header**, meant to be set by trusted
+   AIDP components carrying an authenticated end-user's identity (also consumed by
+   `lakeflow`'s `DataFlowAuthContextRequestFilter`). A caller would have to inject a
+   valid serialized USER principal — impersonation, and presumably stripped/validated
+   at the gateway (not in this repo — inferred).
+3. Even if it worked, the reconcile would run *as that user*, not the WI principal —
+   defeating the purpose of WI and muddying per-principal ownership.
+
+⇒ The fix must be **server-side** (items 1–3 above), not a client header.
+
 ---
 
 ## Impact & current workaround
