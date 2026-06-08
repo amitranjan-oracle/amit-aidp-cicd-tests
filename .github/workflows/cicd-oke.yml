@@ -7,8 +7,7 @@ jobs:
   reconcile:
     runs-on: amit-cicd-oke              # == the gha-runner-scale-set install name
     env:
-      AIDP_AUTH_METHOD: oke_workload_identity
-      AIDP_GIT_CREDENTIAL_NAME: cicd-workload-principal
+      AIDP_AUTH_METHOD: oke_workload_identity   # credential name/secret are in deploy/cicd.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

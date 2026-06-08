@@ -3,9 +3,10 @@
 
 Runs on amit-cicd-compute (Python 3.9) under the box's instance principal.
 Reads deploy/cicd.yaml + specs/*.json and brings AIDP to desired state:
+  Phase 0  ensure the GIT_ACCOUNT user-setting (create from OCI secret if absent)
   Phase 1  ensure /Workspace/cicd_folder
   Phase 2  git folder clone (create) or pull main
-  Phase 3  reconcile compute cluster ephemeral_01
+  Phase 3  reconcile compute cluster cicd_01
   Phase 4  reconcile workflow job cicd_workflow_job (cluster key injected)
 Only oci + requests + yaml + stdlib. Python 3.9 compatible.
 """
@@ -26,7 +27,9 @@ log = logging.getLogger("aidp-cicd")
 REQUIRED_CONFIG_KEYS = [
     ("aidp", "region"), ("aidp", "data_lake_ocid"), ("aidp", "path_prefix"),
     ("aidp", "api_version"), ("aidp", "workspace_key"),
-    ("git", "repository_url"), ("git", "branch"), ("git", "credential_key"),
+    ("git", "repository_url"), ("git", "branch"),
+    ("git", "credential_name"), ("git", "credential_secret_id"),
+    ("git", "credential_username"),
     ("git", "parent_dir"), ("git", "folder_path"),
     ("compute", "name"), ("compute", "spec_file"),
     ("workflow", "name"), ("workflow", "spec_file"), ("workflow", "cluster_name"),
@@ -243,22 +246,61 @@ class AidpClient:
                                params={"settingType": "GIT_ACCOUNT"}).json()
         return data.get("items", data) if isinstance(data, dict) else data
 
+    def _read_secret_pat(self, secret_id: str, compartment: Optional[str]) -> str:
+        """Read a PAT from an OCI Vault secret (by OCID, or by name within
+        *compartment*). Requires the running principal to have `read
+        secret-bundles` on the secret."""
+        import base64
+        import oci
+        if not secret_id.startswith("ocid1.vaultsecret"):
+            if not compartment:
+                raise RuntimeError(
+                    "git.credential_secret_id {!r} is a name; set "
+                    "git.credential_secret_compartment to resolve it.".format(secret_id))
+            vc = oci.vault.VaultsClient({"region": self.region}, signer=self.signer)
+            items = vc.list_secrets(compartment_id=compartment, name=secret_id).data
+            if not items:
+                raise RuntimeError("no OCI secret named {!r} in compartment {}".format(
+                    secret_id, compartment))
+            secret_id = items[0].id
+        sc = oci.secrets.SecretsClient({"region": self.region}, signer=self.signer)
+        content = sc.get_secret_bundle(secret_id).data.secret_bundle_content.content
+        return base64.b64decode(content).decode("utf-8").strip()
+
+    def ensure_git_credential(self, cfg: Dict[str, Any]) -> str:
+        """Ensure the GIT_ACCOUNT user-setting named git.credential_name exists
+        under the current principal, creating it from git.credential_secret_id if
+        absent. Returns its key. Runs under whatever principal executes the script
+        (instance principal on the VM, workload identity on OKE), so the setting
+        is always owned by — and visible to — that principal."""
+        g = cfg["git"]
+        name = g["credential_name"]
+        key = _find_setting_key_by_name(self.list_git_account_settings(), name)
+        if key:
+            log.info("git credential %r already exists (key %s)", name, key)
+            return key
+        log.info("git credential %r absent; creating from secret %s", name,
+                 g["credential_secret_id"])
+        pat = self._read_secret_pat(g["credential_secret_id"],
+                                    g.get("credential_secret_compartment"))
+        body = {"name": name, "isDefault": False,
+                "data": {"type": "GIT_ACCOUNT", "providerName": "GITHUB",
+                         "entityType": "PERSONAL_ACCESS_TOKEN",
+                         "username": g["credential_username"],
+                         "personalAccessToken": pat}}
+        key = self.request_ok("POST", self.lake_url("userSettings"), body=body).json().get("key")
+        log.info("created git credential %r (key %s)", name, key)
+        return key
+
     def resolve_git_credential_key(self, cfg: Dict[str, Any]) -> str:
-        """If AIDP_GIT_CREDENTIAL_NAME is set, resolve the GIT_ACCOUNT key by name
-        under the current principal (so a freshly-minted key need not be copied
-        into config); otherwise use the yaml git.credential_key. Used on OKE where
-        the credential is owned by the workload principal."""
-        import os
-        name = os.environ.get("AIDP_GIT_CREDENTIAL_NAME", "").strip()
-        if not name:
-            return cfg["git"]["credential_key"]
-        settings = self.list_git_account_settings()
-        key = _find_setting_key_by_name(settings, name)
+        """Resolve the key of the GIT_ACCOUNT setting named git.credential_name
+        under the current principal (ensure_git_credential guarantees it exists)."""
+        name = cfg["git"]["credential_name"]
+        key = _find_setting_key_by_name(self.list_git_account_settings(), name)
         if not key:
             raise RuntimeError(
                 "GIT_ACCOUNT credential named {!r} not found under the current "
-                "principal (visible: {}). Run oke/init-aidp-credential.sh first."
-                .format(name, [s.get("name") for s in settings]))
+                "principal — phase 0 should have created it.".format(name))
         log.info("resolved git credential %r -> key %s", name, key)
         return key
 
@@ -415,6 +457,14 @@ class AidpClient:
         log.info("updated job %s", key)
 
 
+def phase0_credential(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+    log.info("== Phase 0: ensure git credential ==")
+    if client.offline:
+        log.info("[offline dry-run] would ensure git credential %r (from secret %s)",
+                 cfg["git"]["credential_name"], cfg["git"]["credential_secret_id"]); return
+    client.ensure_git_credential(cfg)
+
+
 def phase1_directory(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 1: ensure directory ==")
     client.ensure_directory(cfg["git"]["parent_dir"])
@@ -521,6 +571,7 @@ def run(cfg: Dict[str, Any], dry_run: bool) -> None:
             raise
         log.warning("No OCI principal (%s); offline dry-run: config/specs only.", exc)
     client = AidpClient(cfg, signer, dry_run=dry_run)
+    phase0_credential(client, cfg)
     phase1_directory(client, cfg)
     phase2_git_folder(client, cfg)
     phase3_compute(client, cfg)
