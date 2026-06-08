@@ -108,7 +108,7 @@ if [ -z "$NP" ]; then
     --node-boot-volume-size-in-gbs "$NODE_BOOT_GB" \
     --placement-configs "[{\"availabilityDomain\":\"$AVAILABILITY_DOMAIN\",\"subnetId\":\"$SUBNET_OCID\"}]" \
     --nsg-ids "[\"$NODE_NSG\"]" \
-    --node-pool-pod-network-option-details '{"cniType":"FLANNEL_OVERLAY"}' \
+    --cni-type FLANNEL_OVERLAY \
     --region "$REGION" --query "data.id" --raw-output)
 fi
 echo "NODE_POOL=$NP" >> "$STATE"
