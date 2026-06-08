@@ -121,21 +121,34 @@ def inject_cluster_key(job_spec: Dict[str, Any], cluster_key: str) -> Dict[str, 
     return j
 
 
-def build_signer():
-    """Auto-detect an OCI signer: resource principal env, else instance principal.
+def select_auth_method(env: Dict[str, str]) -> str:
+    """Pick the OCI signer to build, by priority:
+    OKE workload identity (explicit) > resource principal (env) > instance principal.
+    Pure function over an environment mapping so it is unit-testable.
+    """
+    if env.get("AIDP_AUTH_METHOD", "").strip().lower() == "oke_workload_identity":
+        return "oke_workload_identity"
+    if env.get("OCI_RESOURCE_PRINCIPAL_VERSION"):
+        return "resource_principal"
+    return "instance_principal"
 
-    Both subclass requests.auth.AuthBase, so they plug into requests as auth=.
-    Raises RuntimeError with a clear message if neither is available.
+
+def build_signer():
+    """Build an OCI signer per select_auth_method(); all subclass
+    requests.auth.AuthBase so they plug into requests as auth=.
+    Raises RuntimeError with a clear message if none is available.
     """
     import os
     try:
         import oci
     except ImportError as exc:
         raise RuntimeError(
-            "oci SDK not importable ({}); run this on the OCI box where oci is "
-            "installed.".format(exc)
-        )
-    if os.environ.get("OCI_RESOURCE_PRINCIPAL_VERSION"):
+            "oci SDK not importable ({}); run this where oci is installed.".format(exc))
+    method = select_auth_method(os.environ)
+    if method == "oke_workload_identity":
+        log.info("Using OKE workload-identity signer.")
+        return oci.auth.signers.get_oke_workload_identity_resource_principal_signer()
+    if method == "resource_principal":
         log.info("Using resource-principal signer.")
         return oci.auth.signers.get_resource_principals_signer()
     try:
@@ -143,15 +156,22 @@ def build_signer():
         return oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
     except Exception as exc:  # not on OCI / IMDS unreachable
         raise RuntimeError(
-            "No OCI principal available (no resource-principal env and "
-            "instance-principal init failed: {}). Run this on the OCI box.".format(exc)
-        )
+            "No OCI principal available (instance-principal init failed: {}). "
+            "Run this on the OCI box / OKE pod.".format(exc))
 
 
 def _async_key(resp) -> Optional[str]:
     """Extract an AIDP async-operation key from a response's headers, if present."""
     return (resp.headers.get("datalake-async-operation-key")
             or resp.headers.get("aidp-async-operation-key"))
+
+
+def _find_setting_key_by_name(settings: List[Dict[str, Any]], name: str) -> Optional[str]:
+    """Return the `key` of the userSetting whose `name` matches, else None."""
+    for s in settings:
+        if s.get("name") == name:
+            return s.get("key")
+    return None
 
 
 def _ws_relpath(path: str) -> str:
@@ -216,6 +236,31 @@ class AidpClient:
                 method, url, resp.status_code, resp.text,
                 resp.headers.get("opc-request-id")))
         return resp
+
+    # ---- credentials (GIT_ACCOUNT userSettings, resolved in caller identity) ----
+    def list_git_account_settings(self) -> List[Dict[str, Any]]:
+        data = self.request_ok("GET", self.lake_url("userSettings"),
+                               params={"settingType": "GIT_ACCOUNT"}).json()
+        return data.get("items", data) if isinstance(data, dict) else data
+
+    def resolve_git_credential_key(self, cfg: Dict[str, Any]) -> str:
+        """If AIDP_GIT_CREDENTIAL_NAME is set, resolve the GIT_ACCOUNT key by name
+        under the current principal (so a freshly-minted key need not be copied
+        into config); otherwise use the yaml git.credential_key. Used on OKE where
+        the credential is owned by the workload principal."""
+        import os
+        name = os.environ.get("AIDP_GIT_CREDENTIAL_NAME", "").strip()
+        if not name:
+            return cfg["git"]["credential_key"]
+        settings = self.list_git_account_settings()
+        key = _find_setting_key_by_name(settings, name)
+        if not key:
+            raise RuntimeError(
+                "GIT_ACCOUNT credential named {!r} not found under the current "
+                "principal (visible: {}). Run oke/init-aidp-credential.sh first."
+                .format(name, [s.get("name") for s in settings]))
+        log.info("resolved git credential %r -> key %s", name, key)
+        return key
 
     # ---- Phase 1: directory ----
     def ensure_directory(self, path: str) -> None:
@@ -387,8 +432,9 @@ def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
         client.wait_for_async(client.git_pull(meta["repoKey"], g["folder_path"], g["branch"]))
     else:
         log.info("git folder absent; cloning")
+        cred_key = client.resolve_git_credential_key(cfg)
         client.wait_for_async(client.create_git_folder(
-            g["folder_path"], g["repository_url"], g["branch"], g["credential_key"]))
+            g["folder_path"], g["repository_url"], g["branch"], cred_key))
 
 
 def phase3_compute(client: "AidpClient", cfg: Dict[str, Any]) -> None:
