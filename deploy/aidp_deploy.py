@@ -202,6 +202,13 @@ class AidpClient:
         self.data_lake_id = a["data_lake_ocid"]
         self.path_prefix = a["path_prefix"]
         self.api_version = str(a.get("api_version") or default_api_version_for(self.path_prefix))
+        # Bundle endpoints are served on the aiDataPlatforms surface (20260430),
+        # NOT dataLakes/20240831 (which 404s "Unknown resource: <dataLakeId>") —
+        # same data-lake id, different prefix+version. git/credential/dir ops stay
+        # on the configured (dataLakes) surface, which is proven for them.
+        self.bundle_path_prefix = a.get("bundle_path_prefix", "aiDataPlatforms")
+        self.bundle_api_version = str(a.get("bundle_api_version")
+                                      or default_api_version_for(self.bundle_path_prefix))
         self.workspace_key = a["workspace_key"]
         self.signer = signer
         self.verify_tls = bool(cfg.get("options", {}).get("verify_tls", True))
@@ -220,6 +227,15 @@ class AidpClient:
 
     def ws_url(self, *parts: str) -> str:
         return self.lake_url("workspaces", self.workspace_key, *parts)
+
+    def bundle_lake_url(self, *parts: str) -> str:
+        """Like lake_url, but on the aiDataPlatforms surface where bundle ops live."""
+        base = "https://aidp.{}.oci.oraclecloud.com/{}/{}/{}".format(
+            self.region, self.bundle_api_version, self.bundle_path_prefix, self.data_lake_id)
+        return "/".join([base] + [p.strip("/") for p in parts]) if parts else base
+
+    def bundle_ws_url(self, *parts: str) -> str:
+        return self.bundle_lake_url("workspaces", self.workspace_key, *parts)
 
     # ---- signed request ----
     def request(self, method: str, url: str, body: Optional[dict] = None,
@@ -482,7 +498,8 @@ class AidpClient:
         so this reconcile no longer manages clusters/jobs individually."""
         if self.dry_run:
             log.info("[dry-run] deploy bundle %s", bundle_path); return
-        resp = self.request_ok("POST", self.ws_url("bundles", "actions", "deploy"),
+        # Bundle ops use the aiDataPlatforms surface (see bundle_ws_url).
+        resp = self.request_ok("POST", self.bundle_ws_url("bundles", "actions", "deploy"),
                                body={"path": bundle_path})
         self._wait_if_async(resp)
         log.info("deployed bundle %s", bundle_path)

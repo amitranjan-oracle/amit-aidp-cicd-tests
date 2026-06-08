@@ -333,6 +333,9 @@ class BundleDeploy(unittest.TestCase):
         client.deploy_bundle("/Workspace/x/bundle")
         self.assertEqual(seen["method"], "POST")
         self.assertTrue(seen["url"].endswith("/bundles/actions/deploy"))
+        # bundle ops use the aiDataPlatforms/20260430 surface, not dataLakes/20240831
+        self.assertIn("/aiDataPlatforms/", seen["url"])
+        self.assertIn("/20260430/", seen["url"])
         self.assertEqual(seen["body"], {"path": "/Workspace/x/bundle"})
 
     def test_phase3_builds_bundle_path_and_deploys(self):
