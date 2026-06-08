@@ -42,7 +42,7 @@ runner) is explicitly **out of scope** for this branch.
 | 2 | Pod → AIDP auth | **OKE Workload Identity** (workload dynamic group → AIDP role GROUP member). |
 | 3 | ARC → GitHub auth | **PAT** from OCI Vault secret `amitranjan-git-pat`, stored as a k8s Secret. |
 | 4 | VM coexistence | **Coexist** — new `cicd-oke.yml`, VM workflow untouched. |
-| 5 | Runner image | **Stock** `ghcr.io/actions/actions-runner`; `pip install --user oci requests pyyaml` at job start (no custom OCIR image). |
+| 5 | Runner image / Python | **Stock** `ghcr.io/actions/actions-runner` (no custom OCIR image). The stock image is minimal and ships **no Python** and runs **non-root**, so Python is provisioned per-job by **`actions/setup-python@v5`** (root-less, pulls a self-contained build via NAT into the runner tool cache), then `pip install oci requests pyyaml`. |
 | 6 | ARC flavor | **GitHub-official** `gha-runner-scale-set` (controller + scale set), **not** legacy summerwind ARC. |
 | 7 | Network placement | **Same subnet** as `amit-cicd-compute` (`10.0.1.0/24`), private API endpoint, flannel overlay, OKE NSGs (shared security list untouched). |
 | 8 | Workload DG | **I create it and output the OCID; the user adds it to `AI_DATA_PLATFORM_ADMIN`.** |
@@ -143,8 +143,8 @@ from inside the VCN — i.e. from `amit-cicd-compute` (reached via the
   secret. **The same token backs all three stores** (Vault = canonical, k8s
   Secret = runner, AIDP userSetting = backend); only the *storage* differs.
 - **Sequencing:** cluster → WI/DG/role → `init-aidp-credential` (WI pod creates
-  `cicd-workload-principal`) → its key flows to the OKE runner via
-  `AIDP_GIT_CREDENTIAL_KEY`.
+  `cicd-workload-principal`) → the OKE runner resolves it **by name** via
+  `AIDP_GIT_CREDENTIAL_NAME=cicd-workload-principal` (no key copying).
 
 ## 5. Component / file layout
 
@@ -161,10 +161,12 @@ oke/
   values-controller.yaml      # gha-runner-scale-set-controller Helm values
   values-runnerset.yaml       # gha-runner-scale-set values: repo URL, PAT secret ref,
                               #   scaleSetName=oke-aidp-runners, min/maxRunners,
-                              #   template: serviceAccountName + AIDP_* env
+                              #   template.spec.serviceAccountName=aidp-runner-sa (WI subject)
   config.env                  # operator-edited vars (OCIDs, names) sourced by the scripts
 docs/oke-runner-setup.md      # README/runbook: prereqs, network/security, ordered steps, verify
-.github/workflows/cicd-oke.yml# workflow_dispatch; runs-on: oke-aidp-runners; pip deps; reconcile
+.github/workflows/cicd-oke.yml# workflow_dispatch; runs-on: oke-aidp-runners;
+                              #   env AIDP_AUTH_METHOD + AIDP_GIT_CREDENTIAL_NAME;
+                              #   actions/setup-python -> pip install -> reconcile
 deploy/aidp_deploy.py         # + WI signer branch + AIDP_GIT_CREDENTIAL_KEY override (VM unchanged)
 ```
 
@@ -178,11 +180,16 @@ the discovered OCIDs so the scripts have no magic literals.
   "oke_workload_identity"`, return
   `oci.auth.signers.get_oke_workload_identity_resource_principal_signer()`
   (guarded by `ImportError`, like the existing RP guard).
-- `git.credential_key` is overridden by env `AIDP_GIT_CREDENTIAL_KEY` when set.
+- The AIDP git credential is resolved **by name** at runtime: when env
+  `AIDP_GIT_CREDENTIAL_NAME` is set, the script queries
+  `GET userSettings?settingType=GIT_ACCOUNT` under the current principal and uses
+  the `key` of the setting with that `name`; otherwise it uses the yaml
+  `git.credential_key`. This avoids copying a freshly-generated credential key
+  into config — the OKE workflow just names `cicd-workload-principal`.
 - **VM path is byte-for-byte unchanged:** no env set ⇒ existing RP→instance-
   principal detection and the yaml `credential_key`. Single source of truth for
   the AIDP *target* stays in `deploy/cicd.yaml`; only the two principal-specific
-  knobs are env-overridden on OKE.
+  knobs (`AIDP_AUTH_METHOD`, `AIDP_GIT_CREDENTIAL_NAME`) are env-set on OKE.
 
 ## 7. Security considerations
 
