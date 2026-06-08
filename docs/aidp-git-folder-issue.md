@@ -62,6 +62,26 @@ After the run, the path is a **regular folder (not a git folder)** and is
 `set_parameter.ipynb`), `deploy/requirements-cicd.txt`,
 `docs/scriptable-deployment.md`.
 
+### Re-test — deleting the folder does NOT clear the association (deterministic)
+
+To check whether a clean delete fixes it, the **entire** `/Workspace/cicd_folder`
+was deleted in the UI and the reconcile re-run (CI run `27147182125`, log):
+
+```
+Phase 1: POST .../actions/mkdir            -> HTTP 201  created /Workspace/cicd_folder   (so it WAS absent)
+Phase 2: GET  .../gitFolderMetadata        -> HTTP 200  isAssociated=true, repoKey=cac15ce9-... (STALE)
+         POST .../gitRepositories/cac15ce9-.../actions/pull -> HTTP 204  (pulled, not cloned)
+```
+
+So even after deleting the whole parent folder, `gitFolderMetadata` **still
+reports the path as associated** and the reconcile pulls again. This reproduces
+the stale-association bug deterministically and confirms that *"delete the folder
+and re-run"* is **not** a workaround — the GIT_REPO record must be removed.
+
+(That same run then failed at Phase 4 for an unrelated reason — a client-side
+pagination bug in our reconcile's `list_jobs`, tracked separately, not part of
+this server-side ticket.)
+
 ---
 
 ## Reproduction
@@ -105,10 +125,48 @@ with whatever partial materialization the pull produced.
 
 ## Code findings
 
-_(Pending — from reading `/Users/amitranjan/IdeaProjects/datahub`. Will list the
-`gitFolderMetadata`/`isAssociated` handler, the gitRepository association
-model + its deletion lifecycle, and the pull-vs-create-gitFolder code paths,
-with file:line refs and an inferred/verified marker.)_
+From reading `/Users/amitranjan/IdeaProjects/datahub` (module
+`datahub-dp/git-service/git-service-api`). File:line references are verified;
+the end-to-end *sequence* that produces the partial folder is partly inferred
+(noted below).
+
+**1. Folder deletion can leave the GIT_REPO record behind (the stale association).**
+`stream/events/handlers/DeleteFileHandler.java` (≈232–265): when a deleted
+folder is a git repo root, it deletes the working tree, then tries
+`repoResolverRepository.deleteGitFolderPathInRepository()` (≈237) to remove the
+git-repo metadata. A `404` is handled as "already gone" (OK), but **any other
+exception is only logged + sent to a failure-management service, and the handler
+still returns `PROCESSED` (≈262–264)** — i.e. the folder delete is reported
+successful even though the GIT_REPO DB record was *not* removed. Result: a
+**stale association** — folder gone, repo record remains.
+
+**2. `gitFolderMetadata` never checks that the folder actually exists.**
+`service/GitOperationsService.java` `getGitFoldersMetadatum` (≈1792–1882):
+`findCandidates()` is a pure DB query over the GIT_REPO table (≈1803–1809); if a
+candidate matches, it calls `worktreeTargetResolver.resolveContext()` and returns
+`isAssociated=true` + `repoKey` (≈1878–1881) **without verifying the folder/`.git`
+exists on the volume**. `utils/WorktreeTargetResolver.java` (≈50–139,
+`resolveContext`/`findBestMatch`) does **path-segment matching only** — no
+existence check. So a stale GIT_REPO record makes `isAssociated=true` for a
+deleted path.
+
+**3. PULL does not re-clone and does not mark the folder as a git folder.**
+- Only the CLONE path sets the git-folder marker: `createGitFolder`
+  (`GitOperationsService.java` ≈157–226) sets folder metadata
+  `FOLDER_TYPE=GIT_FOLDER` (≈195). `gitPull` (≈1421–1476) creates no folder and
+  sets **no** `FOLDER_TYPE` metadata — so anything it produces stays a *regular*
+  folder.
+- `git/exec/GitOperationExecutor.java` (≈95–102): if the repo is **not**
+  initialized on FSS and the op is not CLONE, it should fail
+  ("Cloned Repository does not exist").
+
+**Inferred (not fully verifiable from code):** exactly how the PULL then leaves a
+*partial regular* folder — whether git materializes some files before failing,
+or a volume event replay / reconcile creates a partial tree. The agent could not
+confirm the precise file-materialization path from source alone. What is solid:
+(a) the stale association is left by the delete handler, (b) metadata reports it
+associated without an existence check, and (c) PULL never sets the git-folder
+type, so the recovered folder is regular.
 
 ---
 

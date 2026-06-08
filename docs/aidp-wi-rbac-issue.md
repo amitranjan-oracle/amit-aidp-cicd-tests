@@ -147,20 +147,38 @@ We ruled out every client-side / IAM cause before filing:
 
 ---
 
-## Likely root cause (from code study — to confirm)
+## Why each operation worked or failed (code study)
 
-> This section is inferred from reading `IdeaProjects/datahub` and has **not**
-> been confirmed at runtime by the AIDP team. File/line references are provided
-> so it can be verified. Treat as a hypothesis.
+> File/line references below are **verified by grep** against
+> `IdeaProjects/datahub` (`datahub-dp/api-handler/datahub-dp-api/.../com/oracle/datahub`).
+> The decisive role-membership-vs-user-identity distinction itself lives in the
+> backend **Lake** authorization service (not in this repo) and is therefore
+> **inferred** — marked as such. Paths below are relative to the resources/utils
+> packages.
 
-The data-plane resolves the caller's principal in
-`datahub-dp/api-handler/datahub-dp-api/.../utils/AuthUtil.java`,
-`getPrimaryPrincipal()` (≈ lines 92–156). There is **special handling for
-WORKLOAD / COMPUTE_CLUSTER resource principals** that swaps in a different
-principal **only when a `dh-user-principal` HTTP header is present**:
+There are **three different reasons** the workload principal is treated
+inconsistently — not one. The deciding factor for each operation is the
+combination of *(a)* whether the handler converts the principal via
+`AuthUtil.getPrimaryPrincipal()` and *(b)* which access-type it then checks.
+
+| Operation | `getPrimaryPrincipal()`? | Access type checked | Result | Mechanism |
+|---|---|---|---|---|
+| `userSettings` GET/POST | ✅ (via `resolveContext`) `UserSettingsResource.java:338` | service-level (no `WorkspaceAccessType.USER`) | ✅ | light check |
+| `gitFolderMetadata` GET | ✅ `GitResource.java:291` | **`FolderAccessType.READ`** `GitResource.java:301` | ✅ | folder-READ check, not USER |
+| cluster **CREATE** | ✅ `ClusterResource.java:310` | **`WorkspaceAccessType.PRIVILEGED_USER`** `:325` | ✅ | role-membership check |
+| job **CREATE** | ✅ `JobResource.java:155` | privileged/service-level | ✅ | role-membership check |
+| cluster **LIST** | ✅ `ClusterResource.java:1202` | **`WorkspaceAccessType.USER`** `:1209` | ❌ | user-identity check |
+| job **LIST** | ✅ `JobResource.java:524` | **`USER`** (`JobService` `:557–561`) | ❌ | user-identity check |
+| **git pull** | ✅ `GitResource.java:476` | **`WorkspaceAccessType.USER`** `:477` | ❌ | user-identity check |
+| **mkdir** / git folder | ❌ **not called** (`WorkspaceObjectResource.mkdir` `:691`; the file's only `getPrimaryPrincipal` is at `:425`, a different method) | Lake volume handler | ❌ | raw resource principal → Lake |
+
+### Mechanism 1 — `PRIVILEGED_USER` (passes) vs `USER` (fails)
+
+`AuthUtil.getPrimaryPrincipal()` (`AuthUtil.java:92–156`) swaps a
+`WORKLOAD`/`COMPUTE_CLUSTER` principal for a user principal **only when a
+`dh-user-principal` HTTP header is present**:
 
 ```java
-// If principal is workloadId, use the dh-user-principal if available
 String dhUserPrincipal = httpHeaders.getHeaderString(DH_USER_PRINCIPAL_HEADER);
 if (primaryPrincipal != null
         && primaryPrincipal.getClaimValue(ClaimType.RESOURCE_TYPE).isPresent()
@@ -170,45 +188,77 @@ if (primaryPrincipal != null
 }
 ```
 
-Different endpoints then ask for different RBAC permission *types*
-(`WorkspaceAccessType`, verified against the source):
+A programmatic WI caller does **not** send that header, so the principal stays a
+raw **resource (workload) principal**. The handlers then send a `WorkspaceAccessType`
+to the Lake authz service (`performRbacCheck` → `OCIDataLakeUtil` → `lakeUtil.checkRBAC`):
 
-- **CREATE** cluster — `ClusterResource.createCluster()` (decl. line 215) checks
-  `WorkspaceAccessType.PRIVILEGED_USER` at **line 325**.
-- **LIST** clusters — `ClusterResource.listClusters()` (decl. line 1161) checks
-  `WorkspaceAccessType.USER` at **line 1209**.
-- **Git pull** — `GitResource.java` `performRbacCheck(…, WorkspaceAccessType.USER)`
-  at **line 477** (every Git op in that file uses `USER`).
+- **`PRIVILEGED_USER`** (used by CREATE) is a **role-membership** test — "is this
+  principal a member of an admin/privileged role on the data lake?" Any principal
+  type in `AI_DATA_PLATFORM_ADMIN` satisfies it → **CREATE passes**. *(inferred —
+  Lake side)*
+- **`USER`** (used by LIST + git pull) is a **user-identity / per-user-grant**
+  test. A resource principal has no user identity / per-user grant → **fails**.
+  *(inferred — Lake side)*
 
-The principal is serialized to the backend Lake authorization service in
-`OCIDataLakeUtil.serializePrincipal()` / `ServiceUtil.java`, and the response is
-evaluated back in `AuthUtil.java`. The strings `VolumeRequestHandler` and
-`isAccessGranted` have **0 matches anywhere in the `datahub` repo** (verified by
-grep), so that particular denial originates in the **backend Lake/volume
-service**, not in the AIDP API handler.
+### Mechanism 2 — `gitFolderMetadata` uses a different (lighter) check
 
-**Hypothesis:** when no `dh-user-principal` header is supplied (the normal case
-for a programmatic WI caller), the raw workload principal reaches the
-`USER`-permission-type and VolumeRequestHandler checks. The Lake authorization
-path resolves **group/role membership for USER/INSTANCE principals but not for
-WORKLOAD/resource principals**, so those `USER`-type and volume checks fail —
-while the `PRIVILEGED_USER` path used by CREATE does not require that same
-membership resolution and therefore passes. In short: workload-principal →
-role-membership resolution is implemented for some permission types/handlers and
-missing for others.
+`gitFolderMetadata` calls `getPrimaryPrincipal()` then checks
+`FolderAccessType.READ`/`FileAccessType.READ` (`GitResource.java:301,306`) — **not**
+`WorkspaceAccessType.USER` — so it passes where the USER-typed git ops (pull, at
+`:477`) fail.
+
+### Mechanism 3 — `mkdir` never converts the principal at all
+
+`WorkspaceObjectResource.mkdir` (`:691`) passes the **raw** principal straight to
+`workspaceObjectService.createFolder(...)` → the backend Lake **volume** handler.
+It does not call `getPrimaryPrincipal()` (the file's single call is at `:425`, in
+a different method). The Lake volume handler expects a USER principal, so a raw
+workload principal is rejected — this is the `VolumeRequestHandler …
+isAccessGranted failed for CreateDirectory` error. (`VolumeRequestHandler` /
+`isAccessGranted` have **0 matches in the `datahub` repo**, confirming this
+denial is emitted Lake-side.)
+
+### Why instance principals work everywhere (inferred)
+
+OCI **instance** principals work for all of these under the same role. They are
+presumably enriched to a user/principal context upstream (OCI API gateway / Lake
+resolves an instance principal to a usable identity, or the `dh-user-principal`
+header is supplied for them). This enrichment is **not visible in the `datahub`
+repo** — inferred. **Workload** principals get no such enrichment and aren't
+converted unless `dh-user-principal` is set, so they only clear the
+role-membership (`PRIVILEGED_USER`) and folder-READ checks.
+
+**Net:** the inconsistency is the sum of three things — most operations only clear
+authorization for a *user-identity*, the workload principal isn't enriched to one
+(no `dh-user-principal`), and `mkdir` doesn't even attempt the conversion. CREATE
+and `gitFolderMetadata` happen to use checks (role-membership / folder-READ) that
+a bare resource principal can satisfy.
 
 ---
 
 ## Requested fix
 
 Make workload/resource-principal authorization **consistent across all
-operations**: resolve a workload principal's dynamic-group → role membership for
-the `USER` permission-type checks (LIST clusters/jobs, git pull) and for the
-VolumeRequestHandler checks (mkdir, git folder), the same way it already works
-for the `PRIVILEGED_USER` checks (cluster/job CREATE) and for instance
-principals. Equivalently: if a `dh-user-principal` enrichment is required for
-workload principals, propagate it for **all** workspace operations, not just the
-CREATE path.
+operations**. Concretely, addressing the three mechanisms above:
+
+1. **Enrich the workload principal to a user identity for `USER`-typed checks.**
+   Whatever makes an OCI *instance* principal satisfy `WorkspaceAccessType.USER`
+   today (upstream enrichment / `dh-user-principal`) should also apply to
+   *workload* principals — so LIST clusters/jobs and git pull resolve the
+   workload principal's DG→role membership instead of failing for lack of a user
+   identity.
+2. **Call `getPrimaryPrincipal()` on the volume/`mkdir` path.**
+   `WorkspaceObjectResource.mkdir` (`:691`) passes the raw principal to the Lake
+   volume handler without conversion (unlike the cluster/git resources). It
+   should convert/enrich the principal the same way, so the Lake volume handler
+   receives a usable identity.
+3. **Or: have `PRIVILEGED_USER`-style role-membership authorization apply to the
+   `USER` and volume checks** for principals that are members of an admin role —
+   i.e. don't require a per-user grant when the principal already holds the role.
+
+Equivalently in one line: if a `dh-user-principal`-style enrichment is what makes
+the working operations work, propagate it to **all** workspace operations
+(including LIST, git pull, and `mkdir`), not just CREATE / `gitFolderMetadata`.
 
 ---
 
