@@ -14,6 +14,13 @@ jobs:
     # workspace VolumeRequestHandler does NOT authorize WI principals (mkdir/git
     # folder ops get RBAC-denied), whereas the node instance principal IS
     # authorized. The runner pods reach the node IMDS to get that principal.
+    #
+    # The OKE runner uses its OWN AIDP git folder: per-instance-principal
+    # credential ownership means the OKE node principal can't pull the folder the
+    # VM created (and vice-versa), so each runner owns a distinct folder.
+    env:
+      AIDP_PARENT_DIR: /Workspace/cicd_folder
+      AIDP_FOLDER_PATH: /Workspace/cicd_folder/amit-aidp-cicd-tests-oke
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
