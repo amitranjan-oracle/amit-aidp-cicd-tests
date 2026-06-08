@@ -50,7 +50,7 @@ runner) is explicitly **out of scope** for this branch.
 ### ARC consequence — how `runs-on` works here
 With `gha-runner-scale-set`, a job targets the **runner scale set's installation
 name**, *not* an AND-matched label list. The OKE job uses
-`runs-on: aidp-cicd-runners` (the Helm release / scale-set name). The legacy
+`runs-on: amit-cicd-oke` (the Helm release / scale-set name). The legacy
 `runs-on: [self-hosted, oke, aidp]` label model does **not** apply to this chart.
 
 ## 3. Network design (discovered, real values)
@@ -95,7 +95,7 @@ OCI CLI auth (instance principal or config) to run
 - **Names** (theme `aidp-cicd-test` — testing AIDP CI/CD via GitHub): cluster
   `aidp-cicd-test`; node pool `aidp-cicd-test-np`; NSGs `aidp-cicd-test-api-nsg`
   / `aidp-cicd-test-node-nsg`; workload DG `aidp-cicd-test-workload-dg`; runner
-  scale set `aidp-cicd-runners` (= the `runs-on` value); namespaces `arc-systems`
+  scale set `amit-cicd-oke` (= the `runs-on` value); namespaces `arc-systems`
   / `arc-runners`; ServiceAccount `aidp-runner-sa`.
 - **Type: Enhanced** (required for Workload Identity).
 - **Kubernetes: v1.34.2** (node pool version ≤ control-plane version).
@@ -170,11 +170,11 @@ oke/
   runner-serviceaccount.yaml  # aidp-runner-sa (the WI subject)
   values-controller.yaml      # gha-runner-scale-set-controller Helm values
   values-runnerset.yaml       # gha-runner-scale-set values: repo URL, PAT secret ref,
-                              #   scaleSetName=aidp-cicd-runners, min/maxRunners,
+                              #   scaleSetName=amit-cicd-oke, min/maxRunners,
                               #   template.spec.serviceAccountName=aidp-runner-sa (WI subject)
   config.env                  # operator-edited vars (OCIDs, names) sourced by the scripts
 docs/oke-runner-setup.md      # README/runbook: prereqs, network/security, ordered steps, verify
-.github/workflows/cicd-oke.yml# workflow_dispatch; runs-on: aidp-cicd-runners;
+.github/workflows/cicd-oke.yml# workflow_dispatch; runs-on: amit-cicd-oke;
                               #   env AIDP_AUTH_METHOD + AIDP_GIT_CREDENTIAL_NAME;
                               #   actions/setup-python -> pip install -> reconcile
 deploy/aidp_deploy.py         # + WI signer branch + AIDP_GIT_CREDENTIAL_KEY override (VM unchanged)
