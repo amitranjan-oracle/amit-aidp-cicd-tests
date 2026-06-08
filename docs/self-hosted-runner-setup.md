@@ -86,7 +86,7 @@ tar xzf runner.tar.gz
 sudo ./bin/installdependencies.sh            # OL9: pulls libicu etc.
 ./config.sh --url https://github.com/amitranjan-oracle/amit-aidp-cicd-tests \
             --token <REG_TOKEN> \
-            --labels self-hosted,aidp --name amit-cicd-compute --unattended --replace
+            --labels self-hosted,aidp,vm --name amit-cicd-compute --unattended --replace
 ```
 
 Expect `√ Runner successfully added`.
@@ -144,7 +144,9 @@ reconciles the `cicd_01` cluster + `cicd_workflow_job` job.
 ## As-built record (2026-06-07)
 
 - Runner **v2.334.0** registered on `amit-cicd-compute` as `amit-cicd-compute`
-  with labels `self-hosted,aidp`. Initially run via `nohup` from `~`, then
+  with labels `self-hosted,aidp,vm` (the `vm` label distinguishes it from the
+  OKE runner scale set `amit-cicd-oke`; added live via the runner labels API +
+  baked into `--labels` above for re-registration). Initially run via `nohup` from `~`, then
   **moved to `/opt/actions-runner` and installed as a durable systemd service
   (Option B)** — `systemctl` shows `active (running)` + "Listening for Jobs",
   survives reboot. (The `/home` SELinux `203/EXEC` issue does not occur under
