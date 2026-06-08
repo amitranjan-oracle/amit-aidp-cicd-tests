@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the OKE additions to aidp_deploy (no OCI/network needed)."""
 import unittest
+from datetime import datetime, timezone
 
 import aidp_deploy as A
 
@@ -52,6 +53,20 @@ class FindSettingKeyByName(unittest.TestCase):
         self.assertIsNone(A._find_setting_key_by_name([{"name": "x", "key": "K"}], "y"))
 
 
+class ParseIso(unittest.TestCase):
+    def test_z_with_millis(self):
+        self.assertEqual(A._parse_iso("2026-05-08T22:11:19.646Z"),
+                         datetime(2026, 5, 8, 22, 11, 19, 646000, tzinfo=timezone.utc))
+
+    def test_z_no_frac(self):
+        self.assertEqual(A._parse_iso("2026-06-01T00:00:00Z"),
+                         datetime(2026, 6, 1, tzinfo=timezone.utc))
+
+    def test_none_and_garbage(self):
+        self.assertIsNone(A._parse_iso(None))
+        self.assertIsNone(A._parse_iso("not-a-time"))
+
+
 class ResolveGitCredentialKey(unittest.TestCase):
     def test_resolves_by_config_name(self):
         client, cfg = _client()
@@ -67,32 +82,64 @@ class ResolveGitCredentialKey(unittest.TestCase):
 
 
 class EnsureGitCredential(unittest.TestCase):
-    def test_existing_returns_key_without_reading_secret(self):
-        client, cfg = _client()
-        client.list_git_account_settings = lambda: [
-            {"name": "cicd-git-account", "key": "OLD"}]
-        client._read_secret_pat = lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("must not read secret when credential exists"))
-        self.assertEqual(client.ensure_git_credential(cfg), "OLD")
+    def _wire(self, client, existing=None, secret=None, secret_exc=None):
+        client._find_setting_by_name = lambda name: existing
+        if secret_exc is not None:
+            def _raise(*a, **k):
+                raise secret_exc
+            client._read_secret = _raise
+        else:
+            client._read_secret = lambda sid, comp: secret
+        self.deleted = []
+        client.delete_user_setting = lambda key: self.deleted.append(key)
+        self.created = {}
 
-    def test_absent_reads_secret_and_creates(self):
-        client, cfg = _client()
-        client.list_git_account_settings = lambda: []
-        seen = {}
-        client._read_secret_pat = lambda sid, comp: seen.setdefault("pat", "TOKEN")
-        captured = {}
-
-        def fake_request_ok(method, url, body=None, **k):
-            captured["method"] = method
-            captured["body"] = body
+        def _create(method, url, body=None, **k):
+            self.created["body"] = body
             return _Resp({"key": "NEW"})
+        client.request_ok = _create
 
-        client.request_ok = fake_request_ok
+    def test_absent_creates_from_secret(self):
+        client, cfg = _client()
+        self._wire(client, existing=None,
+                   secret=("TOKEN", datetime(2026, 6, 1, tzinfo=timezone.utc)))
         self.assertEqual(client.ensure_git_credential(cfg), "NEW")
-        self.assertEqual(captured["method"], "POST")
-        self.assertEqual(captured["body"]["data"]["personalAccessToken"], "TOKEN")
-        self.assertEqual(captured["body"]["data"]["type"], "GIT_ACCOUNT")
-        self.assertEqual(captured["body"]["name"], "cicd-git-account")
+        self.assertEqual(self.created["body"]["data"]["personalAccessToken"], "TOKEN")
+        self.assertEqual(self.deleted, [])
+
+    def test_present_rotated_recreates(self):
+        client, cfg = _client()
+        existing = {"name": "cicd-git-account", "key": "OLD",
+                    "timeUpdated": "2026-05-01T00:00:00Z"}
+        self._wire(client, existing=existing,
+                   secret=("TOKEN", datetime(2026, 6, 1, tzinfo=timezone.utc)))  # newer
+        self.assertEqual(client.ensure_git_credential(cfg), "NEW")
+        self.assertEqual(self.deleted, ["OLD"])  # recreated
+
+    def test_present_not_rotated_noop(self):
+        client, cfg = _client()
+        existing = {"name": "cicd-git-account", "key": "OLD",
+                    "timeUpdated": "2026-06-01T00:00:00Z"}
+        self._wire(client, existing=existing,
+                   secret=("TOKEN", datetime(2026, 5, 1, tzinfo=timezone.utc)))  # older
+        self.assertEqual(client.ensure_git_credential(cfg), "OLD")
+        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.created, {})  # no create
+
+    def test_secret_unreadable_keeps_existing(self):
+        client, cfg = _client()
+        existing = {"name": "cicd-git-account", "key": "OLD",
+                    "timeUpdated": "2026-06-01T00:00:00Z"}
+        self._wire(client, existing=existing, secret_exc=RuntimeError("401 NotAuthorized"))
+        self.assertEqual(client.ensure_git_credential(cfg), "OLD")
+        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.created, {})
+
+    def test_secret_unreadable_and_absent_raises(self):
+        client, cfg = _client()
+        self._wire(client, existing=None, secret_exc=RuntimeError("401 NotAuthorized"))
+        with self.assertRaises(RuntimeError):
+            client.ensure_git_credential(cfg)
 
 
 if __name__ == "__main__":

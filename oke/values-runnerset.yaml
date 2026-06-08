@@ -12,3 +12,12 @@ template:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
         command: ["/home/runner/run.sh"]
+        # Virtual-node pods must declare resources (the underlying Container
+        # Instance is sized to these). The reconcile job is light (python/git).
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"

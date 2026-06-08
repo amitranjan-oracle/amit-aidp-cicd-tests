@@ -86,8 +86,8 @@ if [ -z "$CLUSTER" ]; then
     --kubernetes-version "$K8S_VERSION" --type ENHANCED_CLUSTER \
     --endpoint-subnet-id "$SUBNET_OCID" --endpoint-nsg-ids "[\"$API_NSG\"]" \
     --endpoint-public-ip-enabled false \
-    --pods-cidr "$POD_CIDR" --services-cidr "$SERVICE_CIDR" \
-    --cluster-pod-network-options '[{"cniType":"FLANNEL_OVERLAY"}]' \
+    --services-cidr "$SERVICE_CIDR" \
+    --cluster-pod-network-options '[{"cniType":"OCI_VCN_IP_NATIVE"}]' \
     --region "$REGION" >/dev/null
   for i in $(seq 1 60); do CLUSTER=$(find_cluster); [ -n "$CLUSTER" ] && [ "$CLUSTER" != "null" ] && break; sleep 5; done
 fi
@@ -101,33 +101,28 @@ for i in $(seq 1 120); do
   sleep 15
 done
 
-# --- 4. Node image for k8s version + shape (OL8, x86, non-GPU) ---
-# jmespath `contains()==false` is unreliable here; filter the source list in python
-# and pick the newest matching image (names sort lexicographically by date).
-IMAGE=$(oci ce node-pool-options get --node-pool-option-id all --region "$REGION" \
-  --query 'data.sources[].{name:"source-name",image:"image-id"}' --output json 2>/dev/null \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); m=[r for r in d if '$K8S_VERSION'.lstrip('v') in r['name'] and 'Oracle-Linux-8' in r['name'] and 'aarch64' not in r['name'] and 'GPU' not in r['name']]; print(sorted(m,key=lambda r:r['name'])[-1]['image'] if m else '')")
-[ -z "$IMAGE" ] && { echo "no OL8 x86 node image found for $K8S_VERSION"; exit 1; }
-log "node image = $IMAGE"
-echo "NODE_IMAGE=$IMAGE" >> "$STATE"
-
-# --- 5. Node pool (1 node, small) — also async; submit then find by name ---
-find_np(){ oci ce node-pool list -c "$COMPARTMENT_OCID" --cluster-id "$CLUSTER" --region "$REGION" \
-  --name "$NODE_POOL_NAME" --query "data[0].id" --raw-output 2>/dev/null || true; }
-NP=$(find_np); [ "$NP" = "null" ] && NP=""
-if [ -z "$NP" ]; then
-  oci ce node-pool create \
-    --cluster-id "$CLUSTER" --compartment-id "$COMPARTMENT_OCID" --name "$NODE_POOL_NAME" \
-    --kubernetes-version "$K8S_VERSION" --node-shape "$NODE_SHAPE" \
-    --node-shape-config "{\"ocpus\":$NODE_OCPUS,\"memoryInGBs\":$NODE_MEM_GB}" \
-    --node-image-id "$IMAGE" --size "$NODE_COUNT" \
-    --node-boot-volume-size-in-gbs "$NODE_BOOT_GB" \
-    --placement-configs "[{\"availabilityDomain\":\"$AVAILABILITY_DOMAIN\",\"subnetId\":\"$SUBNET_OCID\"}]" \
-    --nsg-ids "[\"$NODE_NSG\"]" \
-    --cni-type FLANNEL_OVERLAY \
-    --region "$REGION" >/dev/null
-  for i in $(seq 1 30); do NP=$(find_np); [ -n "$NP" ] && [ "$NP" != "null" ] && break; sleep 5; done
+# --- 4. Virtual node pool (serverless pods; no IMDS issue) ---
+# Managed node pools can't launch here (tenancy enforces IMDSv2; OKE node pools
+# expose no IMDS knob). Virtual nodes run pods on OCI-managed infra. Requires the
+# cluster to be OCI_VCN_IP_NATIVE (set above). create is async -> submit, find, poll.
+find_vnp(){ oci ce virtual-node-pool list -c "$COMPARTMENT_OCID" --cluster-id "$CLUSTER" --region "$REGION" \
+  --query "data[?\"display-name\"=='$VNODE_POOL_NAME' && \"lifecycle-state\"!='DELETED' && \"lifecycle-state\"!='DELETING'].id | [0]" --raw-output 2>/dev/null || true; }
+VNP=$(find_vnp); [ "$VNP" = "null" ] && VNP=""
+if [ -z "$VNP" ]; then
+  oci ce virtual-node-pool create \
+    --cluster-id "$CLUSTER" --compartment-id "$COMPARTMENT_OCID" --display-name "$VNODE_POOL_NAME" \
+    --placement-configurations "[{\"availabilityDomain\":\"$AVAILABILITY_DOMAIN\",\"subnetId\":\"$VNODE_SUBNET_OCID\"}]" \
+    --pod-configuration "{\"subnetId\":\"$POD_SUBNET_OCID\",\"shape\":\"$POD_SHAPE\",\"nsgIds\":[\"$NODE_NSG\"]}" \
+    --nsg-ids "[\"$NODE_NSG\"]" --size "$VNODE_SIZE" --region "$REGION" >/dev/null
+  for i in $(seq 1 30); do VNP=$(find_vnp); [ -n "$VNP" ] && [ "$VNP" != "null" ] && break; sleep 5; done
 fi
-echo "NODE_POOL=$NP" >> "$STATE"
-log "NODE_POOL=$NP — nodes provisioning (poll: oci ce node-pool get --node-pool-id $NP)"
+echo "VNODE_POOL=$VNP" >> "$STATE"
+log "VNODE_POOL=$VNP — waiting for ACTIVE"
+for i in $(seq 1 60); do
+  ST=$(oci ce virtual-node-pool get --virtual-node-pool-id "$VNP" --region "$REGION" --query 'data."lifecycle-state"' --raw-output 2>/dev/null || true)
+  printf '  vnode pool state=%s\n' "$ST"
+  [ "$ST" = "ACTIVE" ] && break
+  { [ "$ST" = "FAILED" ] || [ "$ST" = "NEEDS_ATTENTION" ]; } && { echo "vnode pool $ST"; break; }
+  sleep 15
+done
 log "Done. state.env:"; cat "$STATE"

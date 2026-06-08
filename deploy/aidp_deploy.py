@@ -177,6 +177,27 @@ def _find_setting_key_by_name(settings: List[Dict[str, Any]], name: str) -> Opti
     return None
 
 
+def _parse_iso(ts: Optional[str]):
+    """Parse an ISO-8601 timestamp (e.g. '2026-05-08T22:11:19.646Z') to an aware
+    datetime, tolerating a trailing 'Z' and variable fractional digits. Returns
+    None if absent/unparseable (callers treat None as 'unknown -> recreate')."""
+    if not ts:
+        return None
+    import re
+    from datetime import datetime
+    s = ts.strip().replace("Z", "+00:00")
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?([+-]\d{2}:\d{2})?$", s)
+    if not m:
+        return None
+    base, frac, off = m.group(1), m.group(2) or "", m.group(3) or "+00:00"
+    if frac:
+        frac = (frac + "000000")[:7]  # normalize to 6 fractional digits for py3.9
+    try:
+        return datetime.fromisoformat(base + frac + off)
+    except ValueError:
+        return None
+
+
 def _ws_relpath(path: str) -> str:
     """Workspace-root-relative path for the gitFolders API ("must be relative").
 
@@ -246,10 +267,18 @@ class AidpClient:
                                params={"settingType": "GIT_ACCOUNT"}).json()
         return data.get("items", data) if isinstance(data, dict) else data
 
-    def _read_secret_pat(self, secret_id: str, compartment: Optional[str]) -> str:
-        """Read a PAT from an OCI Vault secret (by OCID, or by name within
-        *compartment*). Requires the running principal to have `read
-        secret-bundles` on the secret."""
+    def _find_setting_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return the full GIT_ACCOUNT userSetting dict matching name, else None."""
+        for s in self.list_git_account_settings():
+            if s.get("name") == name:
+                return s
+        return None
+
+    def _read_secret(self, secret_id: str, compartment: Optional[str]):
+        """Read (pat, version_time) from an OCI Vault secret (by OCID, or by name
+        within *compartment*). Requires the running principal to have `read
+        secret-bundles` on the secret. version_time is the current version's
+        creation time (an aware datetime), used to detect PAT rotation."""
         import base64
         import oci
         if not secret_id.startswith("ocid1.vaultsecret"):
@@ -263,33 +292,51 @@ class AidpClient:
                 raise RuntimeError("no OCI secret named {!r} in compartment {}".format(
                     secret_id, compartment))
             secret_id = items[0].id
-        sc = oci.secrets.SecretsClient({"region": self.region}, signer=self.signer)
-        content = sc.get_secret_bundle(secret_id).data.secret_bundle_content.content
-        return base64.b64decode(content).decode("utf-8").strip()
+        bundle = oci.secrets.SecretsClient(
+            {"region": self.region}, signer=self.signer).get_secret_bundle(secret_id).data
+        pat = base64.b64decode(bundle.secret_bundle_content.content).decode("utf-8").strip()
+        return pat, getattr(bundle, "time_created", None)
+
+    def delete_user_setting(self, key: str) -> None:
+        self.request_ok("DELETE", self.lake_url("userSettings", key), ok=(200, 202, 204))
 
     def ensure_git_credential(self, cfg: Dict[str, Any]) -> str:
-        """Ensure the GIT_ACCOUNT user-setting named git.credential_name exists
-        under the current principal, creating it from git.credential_secret_id if
-        absent. Returns its key. Runs under whatever principal executes the script
-        (instance principal on the VM, workload identity on OKE), so the setting
-        is always owned by — and visible to — that principal."""
+        """Reconcile the GIT_ACCOUNT user-setting named git.credential_name against
+        the OCI secret (source of truth), under the current principal:
+          absent                       -> create from secret
+          present + secret rotated     -> delete + recreate (new PAT picked up)
+          present + not rotated         -> no-op
+          present + secret unreadable  -> keep existing (best-effort; warn)
+        Created under whoever runs this (VM instance principal / OKE workload
+        identity), so the setting is always owned by — and visible to — that
+        principal. Returns the resolved key."""
         g = cfg["git"]
         name = g["credential_name"]
-        key = _find_setting_key_by_name(self.list_git_account_settings(), name)
-        if key:
-            log.info("git credential %r already exists (key %s)", name, key)
-            return key
-        log.info("git credential %r absent; creating from secret %s", name,
-                 g["credential_secret_id"])
-        pat = self._read_secret_pat(g["credential_secret_id"],
-                                    g.get("credential_secret_compartment"))
+        existing = self._find_setting_by_name(name)
+        try:
+            pat, secret_time = self._read_secret(
+                g["credential_secret_id"], g.get("credential_secret_compartment"))
+        except Exception as exc:  # noqa: BLE001 - fall back to an existing credential
+            if existing:
+                log.warning("cannot read secret %s (%s); keeping existing credential %r",
+                            g["credential_secret_id"], exc, name)
+                return existing["key"]
+            raise RuntimeError("git credential {!r} is absent and its secret is "
+                               "unreadable: {}".format(name, exc))
+        if existing:
+            updated = _parse_iso(existing.get("timeUpdated"))
+            if secret_time is not None and updated is not None and secret_time <= updated:
+                log.info("git credential %r is up to date (secret not rotated since)", name)
+                return existing["key"]
+            log.info("git credential %r stale/rotated; recreating from secret", name)
+            self.delete_user_setting(existing["key"])
         body = {"name": name, "isDefault": False,
                 "data": {"type": "GIT_ACCOUNT", "providerName": "GITHUB",
                          "entityType": "PERSONAL_ACCESS_TOKEN",
                          "username": g["credential_username"],
                          "personalAccessToken": pat}}
         key = self.request_ok("POST", self.lake_url("userSettings"), body=body).json().get("key")
-        log.info("created git credential %r (key %s)", name, key)
+        log.info("git credential %r created (key %s)", name, key)
         return key
 
     def resolve_git_credential_key(self, cfg: Dict[str, Any]) -> str:
