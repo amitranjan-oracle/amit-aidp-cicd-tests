@@ -10,3 +10,6 @@ venv/
 .venv/
 .DS_Store
 *.log
+
+# OKE derived OCIDs (cluster/NSG/DG) — environment-specific, not committed
+oke/state.env

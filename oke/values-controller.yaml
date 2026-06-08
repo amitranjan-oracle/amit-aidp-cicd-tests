@@ -1,0 +1,11 @@
+# Helm values for gha-runner-scale-set-controller.
+# Virtual-node pods must declare resource requests (the Container Instance is
+# sized to them), so set them explicitly for the controller manager.
+replicaCount: 1
+resources:
+  requests:
+    cpu: "250m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"

@@ -1,4 +1,4 @@
-name: aidp-cicd
+name: aidp-cicd-vm
 
 on:
   push:
@@ -9,12 +9,12 @@ on:
 # self-hosted runner (it holds the box's instance principal).
 
 concurrency:
-  group: aidp-cicd
+  group: aidp-cicd-vm
   cancel-in-progress: false
 
 jobs:
   deploy:
-    runs-on: [self-hosted, aidp]
+    runs-on: [self-hosted, aidp, vm]   # the amit-cicd-compute VM runner
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,4 +25,4 @@ jobs:
 
       - name: Reconcile AIDP
         run: |
-          python3 deploy/aidp_deploy.py --config deploy/cicd.yaml
+          python3 deploy/aidp_deploy.py --config deploy/cicd.yaml --runner vm
