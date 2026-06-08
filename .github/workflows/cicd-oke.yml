@@ -1,0 +1,22 @@
+name: aidp-cicd-oke
+on:
+  workflow_dispatch: {}
+
+# Coexists with cicd.yml (VM). Targets the OKE runner scale set by name.
+jobs:
+  reconcile:
+    runs-on: amit-cicd-oke              # == the gha-runner-scale-set install name
+    env:
+      AIDP_AUTH_METHOD: oke_workload_identity
+      AIDP_GIT_CREDENTIAL_NAME: cicd-workload-principal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python deps
+        run: pip install oci requests pyyaml
+      - name: Preflight imports
+        run: python3 -c "import oci, requests, yaml; print('deps ok', oci.__version__)"
+      - name: Reconcile AIDP
+        run: python3 deploy/aidp_deploy.py --config deploy/cicd.yaml
