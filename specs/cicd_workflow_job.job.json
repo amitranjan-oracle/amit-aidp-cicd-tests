@@ -9,13 +9,13 @@
   "tasks": [
     { "type": "NOTEBOOK_TASK", "taskKey": "set_parameter", "dependsOn": [],
       "runIf": "ALL_SUCCESS", "maxRetries": 0,
-      "notebookPath": "/Workspace/cicd_test/amit-aidp-cicd-tests/src/set_parameter.ipynb",
+      "notebookPath": "/Workspace/cicd_test_01/amit-aidp-cicd-tests/src/set_parameter.ipynb",
       "cluster": { "clusterName": "cicd_01", "newCluster": null },
       "parameters": [] },
     { "type": "NOTEBOOK_TASK", "taskKey": "print_parameter",
       "dependsOn": [ { "taskKey": "set_parameter", "outcome": null } ],
       "runIf": "ALL_SUCCESS", "maxRetries": 0,
-      "notebookPath": "/Workspace/cicd_test/amit-aidp-cicd-tests/src/print_parameter.ipynb",
+      "notebookPath": "/Workspace/cicd_test_01/amit-aidp-cicd-tests/src/print_parameter.ipynb",
       "cluster": { "clusterName": "cicd_01", "newCluster": null },
       "parameters": [
         { "name": "job_param",  "value": "{{job.parameters.job_param}}" },

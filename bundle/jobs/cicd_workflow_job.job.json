@@ -24,7 +24,7 @@
     "maxRetries" : 0,
     "minRetryIntervalMillis" : null,
     "isRetryOnTimeout" : null,
-    "notebookPath" : "${bundle.root}/.aidp/artifacts/cicd_test/amit-aidp-cicd-tests/src/set_parameter.ipynb",
+    "notebookPath" : "/Workspace/cicd_test_01/amit-aidp-cicd-tests/src/set_parameter.ipynb",
     "source" : null,
     "gitConfig" : null,
     "cluster" : {
@@ -45,7 +45,7 @@
     "maxRetries" : 0,
     "minRetryIntervalMillis" : null,
     "isRetryOnTimeout" : null,
-    "notebookPath" : "${bundle.root}/.aidp/artifacts/cicd_test/amit-aidp-cicd-tests/src/print_parameter.ipynb",
+    "notebookPath" : "/Workspace/cicd_test_01/amit-aidp-cicd-tests/src/print_parameter.ipynb",
     "source" : null,
     "gitConfig" : null,
     "cluster" : {
