@@ -1,6 +1,8 @@
 name: aidp-cicd-oke
 on:
   workflow_dispatch: {}
+  push:
+    branches: [feat/oke-runner]   # TEMP: re-test refactored config; reverted next commit
 
 # Coexists with cicd.yml (VM). Targets the OKE runner scale set by name.
 jobs:
