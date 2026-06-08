@@ -493,6 +493,39 @@ class AidpClient:
                   "pullAction": "PULL"})
         return _async_key(resp)
 
+    def get_git_repository(self, repo_key: str) -> Dict[str, Any]:
+        """Fetch the connected git repository INCLUDING its credentialKey.
+        shouldIncludeCredentialKey=true is REQUIRED — without it the key comes
+        back null (verified against the workbench UI's HAR)."""
+        return self.request_ok("GET", self.ws_url("gitRepositories", repo_key),
+                               params={"shouldIncludeCredentialKey": "true"}).json()
+
+    def reassociate_git_credential(self, repo_key: str, credential_key: str) -> None:
+        """Re-point the git repository at *credential_key*. Mirrors the workbench
+        UI's update-git-setting call exactly: PUT {credentialKey} only, which is
+        synchronous (HTTP 204) — no async operation key, no other fields."""
+        if self.dry_run:
+            log.info("[dry-run] re-associate git repo %s -> credential %s",
+                     repo_key, credential_key); return
+        self.request_ok("PUT", self.ws_url("gitRepositories", repo_key),
+                        body={"credentialKey": credential_key})
+        log.info("re-associated git repo %s -> credential %s", repo_key, credential_key)
+
+    def ensure_git_folder_credential(self, cfg: Dict[str, Any], repo_key: str) -> None:
+        """Ensure an existing git folder's repository is associated with the
+        credential owned by the RUNNING principal (resolve_git_credential_key
+        resolves it in the caller's identity context). Per-principal credential
+        ownership means a folder associated under another principal's credential
+        (or none — credentialKey=null) can't be pulled here, so re-associate it."""
+        desired = self.resolve_git_credential_key(cfg)
+        current = self.get_git_repository(repo_key).get("credentialKey")
+        if current == desired:
+            log.info("git folder credential already correct (%s)", desired)
+            return
+        log.info("git folder credential %r != running principal's %r -> re-associating",
+                 current, desired)
+        self.reassociate_git_credential(repo_key, desired)
+
     def wait_for_async(self, async_key: str) -> None:
         if not async_key:
             return
@@ -673,6 +706,10 @@ def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
                     "-> stale association (docs/aidp-git-folder-issue.md); cloning instead", fp)
         associated = False
     if associated:
+        # Ensure the folder is bound to the running principal's credential before
+        # pulling — a credential owned by another principal (or none) can't be
+        # resolved here and the pull would fail. Re-associate if it differs.
+        client.ensure_git_folder_credential(cfg, meta["repoKey"])
         log.info("git folder exists; pulling %s", g["branch"])
         client.wait_for_async(client.git_pull(meta["repoKey"], fp, g["branch"]))
     else:

@@ -372,6 +372,7 @@ class Phase2StaleAssociationGuard(unittest.TestCase):
         self.calls = []
         client.git_pull = lambda *a, **k: self.calls.append("pull")
         client.create_git_folder = lambda *a, **k: self.calls.append("clone")
+        client.ensure_git_folder_credential = lambda *a, **k: None  # tested separately
         return client, cfg
 
     def test_associated_but_parent_absent_clones(self):
@@ -383,6 +384,63 @@ class Phase2StaleAssociationGuard(unittest.TestCase):
         client, cfg = self._client_for_phase2(parent_was_absent=False)
         A.phase2_git_folder(client, cfg)
         self.assertEqual(self.calls, ["pull"])  # healthy association -> pull
+
+
+class GitRepositoryCredential(unittest.TestCase):
+    def test_get_requests_credential_key(self):
+        client, _ = _client()
+        seen = {}
+
+        def fake_ok(method, url, body=None, params=None, **k):
+            seen.update(method=method, url=url, params=params)
+            return _Resp({"credentialKey": "K", "gitUrl": "u"})
+
+        client.request_ok = fake_ok
+        out = client.get_git_repository("R")
+        self.assertEqual(out["credentialKey"], "K")
+        self.assertEqual(seen["method"], "GET")
+        self.assertTrue(seen["url"].endswith("/gitRepositories/R"))
+        # shouldIncludeCredentialKey=true is required or the key comes back null
+        self.assertEqual(seen["params"], {"shouldIncludeCredentialKey": "true"})
+
+    def test_reassociate_puts_credential_key_only(self):
+        client, _ = _client()
+        seen = {}
+
+        def fake_ok(method, url, body=None, params=None, **k):
+            seen.update(method=method, url=url, body=body)
+            return _Resp({}, status_code=204)  # UI: 204 No Content, synchronous
+
+        client.request_ok = fake_ok
+        client.reassociate_git_credential("R", "NEWKEY")
+        self.assertEqual(seen["method"], "PUT")
+        self.assertTrue(seen["url"].endswith("/gitRepositories/R"))
+        self.assertEqual(seen["body"], {"credentialKey": "NEWKEY"})  # matches HAR
+
+
+class EnsureGitFolderCredential(unittest.TestCase):
+    def _wire(self, current_key, desired_key="MINE"):
+        client, cfg = _client()
+        client.resolve_git_credential_key = lambda c: desired_key
+        client.get_git_repository = lambda rk: {"credentialKey": current_key}
+        self.reassoc = []
+        client.reassociate_git_credential = lambda rk, ck: self.reassoc.append((rk, ck))
+        return client, cfg
+
+    def test_noop_when_matches(self):
+        client, cfg = self._wire(current_key="MINE")
+        client.ensure_git_folder_credential(cfg, "R")
+        self.assertEqual(self.reassoc, [])  # already correct -> no PUT
+
+    def test_reassociates_when_other_principal(self):
+        client, cfg = self._wire(current_key="OTHER")
+        client.ensure_git_folder_credential(cfg, "R")
+        self.assertEqual(self.reassoc, [("R", "MINE")])
+
+    def test_reassociates_when_null(self):
+        client, cfg = self._wire(current_key=None)  # HAR showed credentialKey can be null
+        client.ensure_git_folder_credential(cfg, "R")
+        self.assertEqual(self.reassoc, [("R", "MINE")])
 
 
 if __name__ == "__main__":
