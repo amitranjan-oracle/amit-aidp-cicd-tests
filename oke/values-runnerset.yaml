@@ -1,0 +1,14 @@
+# Helm values for the gha-runner-scale-set chart. The Helm RELEASE NAME (set in
+# bootstrap-runner.sh to $RUNNER_SCALE_SET=amit-cicd-oke) becomes the
+# runner-scale-set name and the value used in `runs-on:`.
+githubConfigUrl: "https://github.com/amitranjan-oracle/amit-aidp-cicd-tests"
+githubConfigSecret: aidp-cicd-pat        # pre-created k8s Secret (PAT) — see bootstrap
+minRunners: 0
+maxRunners: 2
+template:
+  spec:
+    serviceAccountName: aidp-runner-sa   # Workload-Identity subject
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]

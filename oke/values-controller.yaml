@@ -1,0 +1,3 @@
+# Helm values for gha-runner-scale-set-controller (chart defaults suffice for a
+# single repo-scoped runner set). Kept as a file for reproducibility/overrides.
+replicaCount: 1
