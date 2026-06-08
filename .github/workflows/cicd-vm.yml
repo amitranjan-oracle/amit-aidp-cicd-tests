@@ -3,10 +3,9 @@ name: aidp-cicd-vm
 on:
   push:
     branches: [main]
-    paths-ignore:        # doc-only changes shouldn't trigger a live reconcile
-      - '**.md'
-      - 'docs/**'
-  workflow_dispatch: {}
+    paths:               # reconcile ONLY when the desired-state specs change
+      - 'specs/**'
+  workflow_dispatch: {}  # manual trigger for deploy-script / cicd.yaml changes
 
 # Public repo: do NOT add pull_request — forked PRs must not run on the
 # self-hosted runner (it holds the box's instance principal).
