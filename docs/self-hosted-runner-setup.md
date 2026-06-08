@@ -1,6 +1,6 @@
 # Self-hosted runner setup — `amit-cicd-compute`
 
-The CI/CD workflow (`.github/workflows/cicd.yml`) runs on a GitHub **self-hosted
+The CI/CD workflow (`.github/workflows/cicd-vm.yml`) runs on a GitHub **self-hosted
 runner** installed on `amit-cicd-compute` (private subnet, has outbound internet
 via NAT). The runner dials **out** to GitHub and jobs are pushed down that
 connection — no inbound port, no public IP, no SSH-from-GitHub required.
@@ -123,7 +123,7 @@ sudo ./svc.sh install opc && sudo ./svc.sh start && sudo ./svc.sh status
 
 ## 6. Pushing the workflow file & triggering
 
-- **Pushing `.github/workflows/cicd.yml` over HTTPS needs a token with the
+- **Pushing `.github/workflows/cicd-vm.yml` over HTTPS needs a token with the
   `workflow` scope.** A plain `gh` OAuth token is rejected (`refusing to allow a
   Personal Access Token to … workflow … without workflow scope`). Either
   `gh auth refresh -h github.com -s workflow`, or **push over SSH** (SSH keys are
@@ -137,9 +137,10 @@ sudo ./svc.sh install opc && sudo ./svc.sh start && sudo ./svc.sh status
 ## 7. First run
 
 Once on `main`, a push (or manual dispatch) makes the runner run
-`python3 deploy/aidp_deploy.py --config deploy/cicd.yaml`, which ensures
-`/Workspace/cicd_folder`, clones/pulls the repo into the AIDP git folder, and
-reconciles the `cicd_01` cluster + `cicd_workflow_job` job.
+`python3 deploy/aidp_deploy.py --config deploy/cicd.yaml --runner vm`, which
+ensures the git credential + `git.parent_dir`, clones/pulls the repo into the
+AIDP git folder (re-associating its credential), and **deploys the AIDP bundle**
+at `git.bundle_path` — which creates/updates its own compute + workflow.
 
 ## As-built record (2026-06-07)
 

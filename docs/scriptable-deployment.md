@@ -8,8 +8,20 @@ Sources studied:
   `datahub-dp/api-handler` (API specs + Java service/CLI implementation).
 - `~/IdeaProjects/oci-python-sdk/` — the OCI Python SDK (signer + generated AIDP client).
 
-Companion script: **`aidp_deploy.py`** (in this directory). It compiles clean
-(`python3 -m py_compile aidp_deploy.py`) and uses only `oci` + `requests`.
+Companion script: **`aidp_deploy.py`** (in this directory).
+
+> **Current production script.** `deploy/aidp_deploy.py` is now **config-driven**
+> (`deploy/cicd.yaml`, not env vars) and runs as a self-hosted-runner reconcile:
+> Phase 0 ensure the GIT_ACCOUNT credential (from an OCI Vault secret) · Phase 1
+> mkdir `parent_dir` · Phase 2 clone/pull the git folder + re-associate it to the
+> running principal's credential · Phase 3 **deploy the bundle** at
+> `git.bundle_path`. It signs with the **instance principal** (via `--runner`,
+> which selects only the signer), uses `oci`+`requests`+`yaml`, and targets the
+> **dataLakes/20240831** surface for git/credential/dir ops and
+> **aiDataPlatforms/20260430** for the bundle deploy. The sections below remain an
+> accurate reference for the underlying **API contracts** (git pull, deploy
+> bundle, async polling, bundle layout); the env-var example in §5 reflects an
+> earlier standalone version.
 
 ---
 

@@ -29,16 +29,15 @@ log = logging.getLogger("aidp-cicd")
 _PREFIX_API_VERSION = {"aiDataPlatforms": "20260430", "dataLakes": "20240831"}
 DEFAULT_API_VERSION = "20260430"
 
-# Per-runner profile. --runner selects BOTH the AIDP signer and the git folder.
-# Both VM and OKE authenticate to AIDP with the host's *instance* principal:
-# OKE Workload Identity authenticates fine but AIDP does NOT authorize WI
-# principals for workspace volume/list ops (see docs/aidp-wi-rbac-issue.md), so
-# the OKE node's instance principal is used — same identity model as the VM.
+# --runner selects ONLY the AIDP signer; VM and OKE are otherwise identical
+# (same config, same git folder, same bundle). Both authenticate with the host's
+# *instance* principal: OKE Workload Identity authenticates but AIDP does NOT
+# authorize WI principals for workspace volume/list ops (docs/aidp-wi-rbac-issue.md),
+# so the OKE node's instance principal is used. A shared folder is safe because
+# Phase 2 re-binds it to the running principal's credential each run; CICD also
+# serializes VM/OKE via a shared concurrency group so deploys never race.
 # (Change RUNNER_AUTH["oke"] to "oke_workload_identity" if AIDP ever fixes that.)
 RUNNER_AUTH = {"vm": "instance_principal", "oke": "instance_principal"}
-# Distinct folder per runner: per-instance-principal credential ownership means
-# the VM and OKE node can't share one git folder.
-RUNNER_FOLDER_SUFFIX = {"vm": "", "oke": "-oke"}
 
 
 def default_api_version_for(path_prefix: str) -> str:
@@ -60,14 +59,13 @@ REQUIRED_CONFIG_KEYS = [
 ]
 
 
-def resolve_folder_path(cfg: Dict[str, Any], runner: str = "vm") -> str:
+def resolve_folder_path(cfg: Dict[str, Any]) -> str:
     """The AIDP git folder path: env AIDP_FOLDER_PATH wins (explicit override),
-    else git.parent_dir + the repo name parsed from git.repository_url, with a
-    per-runner suffix so independent runners own distinct folders.
+    else git.parent_dir + the repo name parsed from git.repository_url.
 
-    Per-instance-principal credential ownership means the VM and OKE node can't
-    share one folder (each pull credential is owned by one principal), so the
-    OKE runner gets a '-oke' suffix (e.g. .../amit-aidp-cicd-tests-oke)."""
+    VM and OKE share one folder — Phase 2 re-binds it to the running principal's
+    credential, so per-principal credential ownership no longer forces separate
+    folders per runner."""
     import os
     env = os.environ.get("AIDP_FOLDER_PATH")
     if env:
@@ -76,17 +74,15 @@ def resolve_folder_path(cfg: Dict[str, Any], runner: str = "vm") -> str:
     repo = g["repository_url"].rstrip("/").split("/")[-1]
     if repo.endswith(".git"):
         repo = repo[:-4]
-    base = g["parent_dir"].rstrip("/") + "/" + repo
-    return base + RUNNER_FOLDER_SUFFIX.get(runner, "")
+    return g["parent_dir"].rstrip("/") + "/" + repo
 
 
 def load_config(path: str) -> Dict[str, Any]:
     """Load + validate the YAML config; raise ValueError listing all missing keys.
 
-    git.parent_dir may be overridden per-runner via AIDP_PARENT_DIR (and the
-    derived folder path via AIDP_FOLDER_PATH) so independent runners target
-    distinct AIDP git folders — per-instance-principal credential ownership means
-    two runners can't share one folder's pull credential.
+    git.parent_dir may be overridden via AIDP_PARENT_DIR (and the derived folder
+    path via AIDP_FOLDER_PATH) as an operational escape hatch. VM and OKE share
+    one folder — Phase 2 re-binds it to the running principal's credential.
     """
     import os
     with open(path) as f:
@@ -216,26 +212,23 @@ class AidpClient:
         self.poll_interval = int(cfg.get("options", {}).get("poll_interval_secs", 5))
         self.dry_run = dry_run
         self.offline = signer is None   # no principal -> validate-only (off-box dry-run)
-        self.runner = "vm"              # set by run() from --runner; drives the folder suffix
-        self.parent_was_absent = False  # set by phase1; Phase 2 stale-association guard
 
     # ---- URL helpers ----
-    def lake_url(self, *parts: str) -> str:
+    def _surface_url(self, api_version: str, path_prefix: str, *parts: str) -> str:
         base = "https://aidp.{}.oci.oraclecloud.com/{}/{}/{}".format(
-            self.region, self.api_version, self.path_prefix, self.data_lake_id)
+            self.region, api_version, path_prefix, self.data_lake_id)
         return "/".join([base] + [p.strip("/") for p in parts]) if parts else base
+
+    def lake_url(self, *parts: str) -> str:
+        return self._surface_url(self.api_version, self.path_prefix, *parts)
 
     def ws_url(self, *parts: str) -> str:
         return self.lake_url("workspaces", self.workspace_key, *parts)
 
-    def bundle_lake_url(self, *parts: str) -> str:
-        """Like lake_url, but on the aiDataPlatforms surface where bundle ops live."""
-        base = "https://aidp.{}.oci.oraclecloud.com/{}/{}/{}".format(
-            self.region, self.bundle_api_version, self.bundle_path_prefix, self.data_lake_id)
-        return "/".join([base] + [p.strip("/") for p in parts]) if parts else base
-
     def bundle_ws_url(self, *parts: str) -> str:
-        return self.bundle_lake_url("workspaces", self.workspace_key, *parts)
+        # Bundle ops live on the aiDataPlatforms surface (see __init__).
+        return self._surface_url(self.bundle_api_version, self.bundle_path_prefix,
+                                 "workspaces", self.workspace_key, *parts)
 
     # ---- signed request ----
     def request(self, method: str, url: str, body: Optional[dict] = None,
@@ -276,7 +269,8 @@ class AidpClient:
             data = resp.json()
             page = data.get("items", data) if isinstance(data, dict) else data
             if not isinstance(page, list):
-                return page  # unexpected shape; hand back as-is
+                raise RuntimeError("GET {} returned a non-list page ({}): {!r}".format(
+                    url, type(page).__name__, data))
             items.extend(page)
             next_page = resp.headers.get("opc-next-page")
             if not next_page or not page:
@@ -319,7 +313,9 @@ class AidpClient:
         return pat, getattr(bundle, "time_created", None)
 
     def delete_user_setting(self, key: str) -> None:
-        self.request_ok("DELETE", self.lake_url("userSettings", key), ok=(200, 202, 204))
+        # Poll if the delete is async (202) so a same-name recreate can't race it.
+        self._wait_if_async(self.request_ok(
+            "DELETE", self.lake_url("userSettings", key), ok=(200, 202, 204)))
 
     def ensure_git_credential(self, cfg: Dict[str, Any]) -> str:
         """Reconcile the GIT_ACCOUNT user-setting named git.credential_name against
@@ -333,6 +329,11 @@ class AidpClient:
         principal. Returns the resolved key."""
         g = cfg["git"]
         name = g["credential_name"]
+        if self.dry_run:  # dry-run must never delete/recreate the credential
+            existing = self._find_setting_by_name(name)
+            log.info("[dry-run] would reconcile git credential %r from secret %s (currently %s)",
+                     name, g["credential_secret_id"], "present" if existing else "absent")
+            return existing["key"] if existing else None
         existing = self._find_setting_by_name(name)
         try:
             pat, secret_time = self._read_secret(
@@ -366,6 +367,13 @@ class AidpClient:
         name = cfg["git"]["credential_name"]
         key = _find_setting_key_by_name(self.list_git_account_settings(), name)
         if not key:
+            if self.dry_run:
+                # In dry-run, phase 0 doesn't actually create the credential, so a
+                # first-run absence is expected — don't fail; downstream clone/pull
+                # are dry-run no-ops anyway.
+                log.info("[dry-run] git credential %r not present yet (phase 0 would "
+                         "create it)", name)
+                return None
             raise RuntimeError(
                 "GIT_ACCOUNT credential named {!r} not found under the current "
                 "principal — phase 0 should have created it.".format(name))
@@ -385,7 +393,7 @@ class AidpClient:
             log.info("created directory %s", path)
             return True
         if resp.status_code == 409 or (resp.status_code == 400
-                and "exist" in (resp.text or "").lower()):
+                and "already exist" in (resp.text or "").lower()):
             log.info("directory %s already exists", path)
             return False
         raise RuntimeError("mkdir {} -> HTTP {}: {}".format(
@@ -408,7 +416,7 @@ class AidpClient:
             "branchName": branch, "credentialKey": credential_key,
             "description": None, "gitProviderKey": None})
         if resp.status_code == 409 or (resp.status_code == 400
-                and "exist" in (resp.text or "").lower()):
+                and "already exist" in (resp.text or "").lower()):
             # A clone onto an already-associated path: almost always AIDP's stale
             # git association (folder gone but GIT_REPO record remains — see
             # docs/aidp-git-folder-issue.md). Fail with an actionable message
@@ -513,18 +521,19 @@ def phase0_credential(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     client.ensure_git_credential(cfg)
 
 
-def phase1_directory(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+def phase1_directory(client: "AidpClient", cfg: Dict[str, Any]) -> bool:
     log.info("== Phase 1: ensure directory ==")
-    # Remember whether the parent was freshly created — Phase 2 uses it to spot
-    # a stale git association (if the parent didn't exist, no git folder under it
+    # Return whether the parent was freshly created — Phase 2 uses it to spot a
+    # stale git association (if the parent didn't exist, no git folder under it
     # can exist, so any isAssociated=true is stale).
-    client.parent_was_absent = client.ensure_directory(cfg["git"]["parent_dir"])
+    return client.ensure_directory(cfg["git"]["parent_dir"])
 
 
-def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
+def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any],
+                      parent_was_absent: bool = False) -> None:
     log.info("== Phase 2: git folder (create or pull) ==")
     g = cfg["git"]
-    fp = resolve_folder_path(cfg, client.runner)  # parent_dir + repo (+ runner suffix), or AIDP_FOLDER_PATH
+    fp = resolve_folder_path(cfg)  # parent_dir + repo name, or AIDP_FOLDER_PATH override
     if client.offline:
         log.info("[offline dry-run] would create-or-pull git folder %s (%s@%s)",
                  fp, g["repository_url"], g["branch"]); return
@@ -535,7 +544,7 @@ def phase2_git_folder(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     # an isAssociated=true is provably STALE. Pulling would leave a regular, partial
     # folder — clone instead (create_git_folder raises a clear error if the stale
     # association still blocks the clone).
-    if associated and client.parent_was_absent:
+    if associated and parent_was_absent:
         log.warning("git folder %s reports associated, but its parent was just created "
                     "-> stale association (docs/aidp-git-folder-issue.md); cloning instead", fp)
         associated = False
@@ -557,7 +566,7 @@ def phase3_bundle(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 3: deploy bundle ==")
     g = cfg["git"]
     # The bundle lives inside the cloned git folder at git.bundle_path.
-    fp = resolve_folder_path(cfg, client.runner)
+    fp = resolve_folder_path(cfg)
     bundle_path = fp.rstrip("/") + "/" + g["bundle_path"].strip("/")
     if client.offline:
         log.info("[offline dry-run] would deploy bundle %s", bundle_path); return
@@ -588,8 +597,9 @@ def _build_signer_with_timeout(timeout_secs: float, method: Optional[str] = None
 
 
 def run(cfg: Dict[str, Any], dry_run: bool, runner: str = "vm") -> None:
-    # The runner profile selects the AIDP signer (RUNNER_AUTH) and git folder.
-    method = RUNNER_AUTH.get(runner, "instance_principal")
+    # --runner selects ONLY the AIDP signer (RUNNER_AUTH). argparse restricts the
+    # value to the map keys, so a missing key is a programming error — fail loud.
+    method = RUNNER_AUTH[runner]
     log.info("Runner profile: %s (auth=%s)", runner, method)
     # Always try for a signer. On-box (incl. dry-run) we get one and make real
     # read-only decisions. Off-box dry-run tolerates no principal -> offline.
@@ -607,10 +617,9 @@ def run(cfg: Dict[str, Any], dry_run: bool, runner: str = "vm") -> None:
             raise
         log.warning("No OCI principal (%s); offline dry-run: config only.", exc)
     client = AidpClient(cfg, signer, dry_run=dry_run)
-    client.runner = runner
     phase0_credential(client, cfg)
-    phase1_directory(client, cfg)
-    phase2_git_folder(client, cfg)
+    parent_was_absent = phase1_directory(client, cfg)
+    phase2_git_folder(client, cfg, parent_was_absent)
     phase3_bundle(client, cfg)
     log.info("== Done ==")
 
@@ -619,8 +628,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="AIDP CI/CD reconcile")
     parser.add_argument("--config", required=True)
     parser.add_argument("--runner", choices=sorted(RUNNER_AUTH), default="vm",
-                        help="Which runner this executes on (vm|oke); selects the "
-                             "AIDP signer (RUNNER_AUTH) and the git folder suffix.")
+                        help="Which runner this executes on (vm|oke); selects ONLY "
+                             "the AIDP signer (RUNNER_AUTH). Everything else is identical.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate + log intended actions; mutate nothing.")
     args = parser.parse_args(argv)

@@ -26,7 +26,8 @@ GitHub push/dispatch ─▶ ARC listener (arc-systems) ─▶ ephemeral runner p
                                    = DataServices-Compute-DG  (authorized for AIDP volume ops)
                                                           ▼
    Phase 0 ensure GIT_ACCOUNT cred (from OCI Vault secret) · Phase 1 mkdir ·
-   Phase 2 clone/pull the OKE git folder · Phase 3 cluster cicd_01 · Phase 4 job cicd_workflow_job
+   Phase 2 clone/pull the git folder (+ re-associate its credential) ·
+   Phase 3 deploy the AIDP bundle (creates its own compute + workflow)
 ```
 
 - **Cluster:** Enhanced OKE, **flannel** CNI, **v1.36.0**, private API endpoint,
@@ -39,14 +40,14 @@ GitHub push/dispatch ─▶ ARC listener (arc-systems) ─▶ ephemeral runner p
 - **AIDP auth:** the **node instance principal** (the pod reaches node IMDS).
   `DataServices-Compute-DG` (which the node matches) is in `AI_DATA_PLATFORM_ADMIN`
   and is authorized for workspace-volume ops.
-- **Git folder:** the OKE runner uses its **own** folder
-  `/Workspace/cicd_folder/amit-aidp-cicd-tests-oke` — per-instance-principal
-  credential ownership means the OKE node can't pull the VM's folder (and
-  vice-versa), so each runner owns a distinct folder. This (and the signer) is
-  selected by `aidp_deploy.py --runner oke`: the `oke` profile maps to the node
-  instance principal (`RUNNER_AUTH`) and the `-oke` folder suffix
-  (`RUNNER_FOLDER_SUFFIX`). The VM workflow passes `--runner vm` (no suffix).
-  `AIDP_FOLDER_PATH` still overrides the derived path if ever needed.
+- **Git folder:** VM and OKE share the **same** git folder (derived from
+  `git.parent_dir` + repo name). `--runner` selects **only the signer**
+  (`RUNNER_AUTH`); everything else — config, folder, bundle — is identical. A
+  shared folder is safe because Phase 2 re-binds it to the running principal's
+  credential each run (per-principal credential ownership no longer forces
+  separate folders). The two workflows also share a concurrency group so VM and
+  OKE never deploy concurrently. (`AIDP_FOLDER_PATH` still overrides the derived
+  path if ever needed.)
 
 ## Findings (why this shape — three dead ends)
 
@@ -144,10 +145,13 @@ GitHub push/dispatch ─▶ ARC listener (arc-systems) ─▶ ephemeral runner p
 | workflow | `cicd-vm.yml` (`aidp-cicd-vm`) | `cicd-oke.yml` (`aidp-cicd-oke`) |
 | `runs-on` | `[self-hosted, aidp, vm]` | `amit-cicd-oke` |
 | AIDP auth | VM instance principal | node instance principal |
-| git folder | `…/amit-aidp-cicd-tests` | `…/amit-aidp-cicd-tests-oke` |
+| git folder | `…/amit-aidp-cicd-tests` | `…/amit-aidp-cicd-tests` (same) |
 
-Both reconcile the **same** `cicd_01` cluster + `cicd_workflow_job` (idempotent
-NO-OP when already in sync); only the git folder differs (credential ownership).
+Both deploy the **same** AIDP bundle (`git.bundle_path`), which creates/updates
+its own compute + workflow. VM and OKE differ **only in the signer** (`--runner`);
+they share the config, git folder, and bundle. A shared concurrency group across
+the two workflows serializes them so they never deploy at the same time, and
+Phase 2 re-binds the folder to whichever principal runs.
 
 ## As-built (live, 2026-06-08, DataServices / us-ashburn-1)
 

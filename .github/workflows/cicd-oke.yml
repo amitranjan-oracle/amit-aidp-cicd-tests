@@ -2,22 +2,23 @@ name: aidp-cicd-oke
 on:
   workflow_dispatch: {}
 
-# Coexists with cicd.yml (VM). Targets the OKE runner scale set by name.
+# Coexists with cicd-vm (VM). Targets the OKE runner scale set by name.
+concurrency:
+  # Shared with cicd-vm — VM and OKE must not deploy concurrently (same folder).
+  group: aidp-cicd-deploy
+  cancel-in-progress: false
+
 jobs:
   reconcile:
     runs-on: amit-cicd-oke              # == the gha-runner-scale-set install name
-    # No AIDP_AUTH_METHOD: the reconcile authenticates to AIDP via the NODE's
-    # instance principal (DataServices-Compute-DG) — same model as the VM runner.
-    # OKE Workload Identity authenticates fine for data-lake ops, but AIDP's
-    # workspace VolumeRequestHandler does NOT authorize WI principals (mkdir/git
-    # folder ops get RBAC-denied), whereas the node instance principal IS
-    # authorized. The runner pods reach the node IMDS to get that principal.
-    #
-    # The OKE runner uses its OWN AIDP git folder: per-instance-principal
-    # credential ownership means the OKE node principal can't pull the folder the
-    # VM created (and vice-versa). `--runner oke` selects the node instance
-    # principal (RUNNER_AUTH) AND the '-oke' folder suffix
-    # (/Workspace/cicd_folder/amit-aidp-cicd-tests-oke) — no env override needed.
+    # `--runner oke` differs from vm ONLY in the signer (RUNNER_AUTH); everything
+    # else — config, git folder, bundle — is identical. The reconcile authenticates
+    # to AIDP via the NODE's instance principal (DataServices-Compute-DG): OKE
+    # Workload Identity authenticates fine for data-lake ops, but AIDP does NOT
+    # authorize WI principals for workspace volume/list ops (docs/aidp-wi-rbac-issue.md),
+    # so the node instance principal is used (runner pods reach the node IMDS).
+    # Phase 2 re-binds the shared git folder to whichever principal runs, so VM
+    # and OKE can use the same folder.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

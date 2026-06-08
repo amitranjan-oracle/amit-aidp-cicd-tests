@@ -83,6 +83,14 @@ class ResolveGitCredentialKey(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             client.resolve_git_credential_key(cfg)
 
+    def test_absent_in_dry_run_returns_none(self):
+        # dry-run phase 0 doesn't create the credential, so a first-run absence
+        # must not fail the resolve (downstream clone/pull are dry-run no-ops).
+        client, cfg = _client()
+        client.dry_run = True
+        client.list_git_account_settings = lambda: [{"name": "x", "key": "K"}]
+        self.assertIsNone(client.resolve_git_credential_key(cfg))
+
 
 class EnsureGitCredential(unittest.TestCase):
     def _wire(self, client, existing=None, secret=None, secret_exc=None):
@@ -170,48 +178,30 @@ class DerivedConfig(unittest.TestCase):
 
     def test_folder_path_env_override(self):
         import os
-        os.environ["AIDP_FOLDER_PATH"] = "/Workspace/cicd_folder/my-repo-oke"
+        os.environ["AIDP_FOLDER_PATH"] = "/Workspace/cicd_folder/my-repo-x"
         try:
             cfg = {"git": {"repository_url": "https://github.com/x/my-repo.git",
                            "parent_dir": "/Workspace/cicd_folder"}}
-            # env override wins for any runner
-            self.assertEqual(A.resolve_folder_path(cfg, "vm"),
-                             "/Workspace/cicd_folder/my-repo-oke")
-            self.assertEqual(A.resolve_folder_path(cfg, "oke"),
-                             "/Workspace/cicd_folder/my-repo-oke")
+            self.assertEqual(A.resolve_folder_path(cfg), "/Workspace/cicd_folder/my-repo-x")
         finally:
             os.environ.pop("AIDP_FOLDER_PATH", None)
 
 
 class RunnerProfile(unittest.TestCase):
-    def _cfg(self):
-        return {"git": {"repository_url": "https://github.com/x/my-repo.git",
-                        "parent_dir": "/Workspace/cicd_folder"}}
-
-    def test_vm_default_no_suffix(self):
+    def test_folder_path_is_runner_independent(self):
+        # VM and OKE share one folder now — no per-runner suffix.
         import os
         os.environ.pop("AIDP_FOLDER_PATH", None)
-        self.assertEqual(A.resolve_folder_path(self._cfg()),
-                         "/Workspace/cicd_folder/my-repo")  # default runner == vm
-
-    def test_oke_appends_suffix(self):
-        import os
-        os.environ.pop("AIDP_FOLDER_PATH", None)
-        self.assertEqual(A.resolve_folder_path(self._cfg(), "oke"),
-                         "/Workspace/cicd_folder/my-repo-oke")
-
-    def test_unknown_runner_no_suffix(self):
-        import os
-        os.environ.pop("AIDP_FOLDER_PATH", None)
-        self.assertEqual(A.resolve_folder_path(self._cfg(), "bogus"),
-                         "/Workspace/cicd_folder/my-repo")
+        cfg = {"git": {"repository_url": "https://github.com/x/my-repo.git",
+                       "parent_dir": "/Workspace/cicd_folder"}}
+        self.assertEqual(A.resolve_folder_path(cfg), "/Workspace/cicd_folder/my-repo")
 
     def test_runner_auth_map(self):
-        # Both runners use the host instance principal (WI is unusable for AIDP
-        # volume/list ops); --runner choices are exactly the RUNNER_AUTH keys.
+        # --runner selects ONLY the signer; both runners use the host instance
+        # principal (WI is unusable for AIDP volume/list ops). No folder suffix.
         self.assertEqual(A.RUNNER_AUTH, {"vm": "instance_principal",
                                          "oke": "instance_principal"})
-        self.assertEqual(A.RUNNER_FOLDER_SUFFIX, {"vm": "", "oke": "-oke"})
+        self.assertFalse(hasattr(A, "RUNNER_FOLDER_SUFFIX"))
 
     def test_build_signer_honors_explicit_method(self):
         # method=None falls back to env selection; an explicit method overrides it.
@@ -234,18 +224,19 @@ class RunnerProfile(unittest.TestCase):
                             captured["m"] = "ip"
 
         import sys
-        sys.modules["oci"] = _FakeOCI
-        try:
-            # explicit method wins even if env says otherwise
-            os.environ["AIDP_AUTH_METHOD"] = "oke_workload_identity"
-            self.assertEqual(A.build_signer("resource_principal"), "RP_SIGNER")
-            self.assertEqual(captured["m"], "rp")
-            # method=None -> env selection (WI)
-            self.assertEqual(A.build_signer(), "WI_SIGNER")
-            self.assertEqual(captured["m"], "wi")
-        finally:
-            os.environ.pop("AIDP_AUTH_METHOD", None)
-            sys.modules.pop("oci", None)
+        from unittest import mock
+        # patch.dict restores any pre-existing real `oci` module after the test
+        with mock.patch.dict(sys.modules, {"oci": _FakeOCI}):
+            try:
+                # explicit method wins even if env says otherwise
+                os.environ["AIDP_AUTH_METHOD"] = "oke_workload_identity"
+                self.assertEqual(A.build_signer("resource_principal"), "RP_SIGNER")
+                self.assertEqual(captured["m"], "rp")
+                # method=None -> env selection (WI)
+                self.assertEqual(A.build_signer(), "WI_SIGNER")
+                self.assertEqual(captured["m"], "wi")
+            finally:
+                os.environ.pop("AIDP_AUTH_METHOD", None)
 
 
 class ListAllPagination(unittest.TestCase):
@@ -298,6 +289,13 @@ class ListAllPagination(unittest.TestCase):
         client.request_ok = lambda *a, **k: _Resp({"items": []}, {"opc-next-page": "Z"})
         self.assertEqual(client.list_all("http://x"), [])
 
+    def test_raises_on_non_list_page(self):
+        client, _ = _client()
+        # a dict without "items" is a malformed list response -> fail loud
+        client.request_ok = lambda *a, **k: _Resp({"unexpected": "shape"}, {})
+        with self.assertRaises(RuntimeError):
+            client.list_all("http://x/jobs")
+
 
 class EnsureDirectory(unittest.TestCase):
     def test_created_returns_true(self):
@@ -309,6 +307,19 @@ class EnsureDirectory(unittest.TestCase):
         client, _ = _client()
         client.request = lambda *a, **k: _Resp({}, status_code=409, text="already exists")
         self.assertFalse(client.ensure_directory("/Workspace/x"))
+
+    def test_400_already_exists_returns_false(self):
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=400, text="folder already exists")
+        self.assertFalse(client.ensure_directory("/Workspace/x"))
+
+    def test_400_other_exist_error_raises(self):
+        # "parent does not exist" contains "exist" but not "already exist" -> not
+        # an already-exists case, must surface as an error (tightened guard).
+        client, _ = _client()
+        client.request = lambda *a, **k: _Resp({}, status_code=400, text="parent does not exist")
+        with self.assertRaises(RuntimeError):
+            client.ensure_directory("/Workspace/x")
 
 
 class CreateGitFolderConflict(unittest.TestCase):
@@ -346,7 +357,6 @@ class BundleDeploy(unittest.TestCase):
         cfg["git"]["parent_dir"] = "/Workspace/cicd_test_01"
         cfg["git"]["bundle_path"] = "bundle"
         client.offline = False
-        client.runner = "vm"
         seen = []
         client.deploy_bundle = lambda p: seen.append(p)
         A.phase3_bundle(client, cfg)
@@ -355,14 +365,12 @@ class BundleDeploy(unittest.TestCase):
 
 
 class Phase2StaleAssociationGuard(unittest.TestCase):
-    def _client_for_phase2(self, parent_was_absent):
+    def _client_for_phase2(self):
         client, cfg = _client()
         cfg["git"]["repository_url"] = "https://github.com/x/repo.git"
         cfg["git"]["parent_dir"] = "/Workspace/cicd_test_01"
         cfg["git"]["branch"] = "main"
         client.offline = False
-        client.runner = "vm"
-        client.parent_was_absent = parent_was_absent
         client.git_folder_metadata = lambda fp: {"isAssociated": True, "repoKey": "R"}
         client.resolve_git_credential_key = lambda c: "CK"
         client.wait_for_async = lambda k: None
@@ -373,13 +381,13 @@ class Phase2StaleAssociationGuard(unittest.TestCase):
         return client, cfg
 
     def test_associated_but_parent_absent_clones(self):
-        client, cfg = self._client_for_phase2(parent_was_absent=True)
-        A.phase2_git_folder(client, cfg)
+        client, cfg = self._client_for_phase2()
+        A.phase2_git_folder(client, cfg, parent_was_absent=True)
         self.assertEqual(self.calls, ["clone"])  # stale association -> clone, not pull
 
     def test_associated_and_parent_existed_pulls(self):
-        client, cfg = self._client_for_phase2(parent_was_absent=False)
-        A.phase2_git_folder(client, cfg)
+        client, cfg = self._client_for_phase2()
+        A.phase2_git_folder(client, cfg, parent_was_absent=False)
         self.assertEqual(self.calls, ["pull"])  # healthy association -> pull
 
 

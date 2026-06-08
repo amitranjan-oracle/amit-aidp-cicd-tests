@@ -12,7 +12,10 @@ on:
 # self-hosted runner (it holds the box's instance principal).
 
 concurrency:
-  group: aidp-cicd-vm
+  # Shared with cicd-oke so the VM and OKE runners never deploy concurrently to
+  # the same workspace (they share one git folder; serializing avoids racing the
+  # per-principal credential re-association in Phase 2).
+  group: aidp-cicd-deploy
   cancel-in-progress: false
 
 jobs:
