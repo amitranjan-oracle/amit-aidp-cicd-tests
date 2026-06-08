@@ -37,9 +37,21 @@ REQUIRED_CONFIG_KEYS = [
 
 
 def load_config(path: str) -> Dict[str, Any]:
-    """Load + validate the YAML config; raise ValueError listing all missing keys."""
+    """Load + validate the YAML config; raise ValueError listing all missing keys.
+
+    A few git fields may be overridden per-runner via env so independent runners
+    can target distinct AIDP git folders (per-instance-principal credential
+    ownership means two runners can't share one folder's pull credential):
+      AIDP_PARENT_DIR -> git.parent_dir, AIDP_FOLDER_PATH -> git.folder_path.
+    """
+    import os
     with open(path) as f:
         cfg = yaml.safe_load(f) or {}
+    for envk, sec, key in (("AIDP_PARENT_DIR", "git", "parent_dir"),
+                           ("AIDP_FOLDER_PATH", "git", "folder_path")):
+        v = os.environ.get(envk)
+        if v and isinstance(cfg.get(sec), dict):
+            cfg[sec][key] = v
     missing = []
     for section, key in REQUIRED_CONFIG_KEYS:
         sec = cfg.get(section)
