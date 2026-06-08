@@ -48,6 +48,7 @@ oci network nsg rules add --nsg-id "$API_NSG" --region "$REGION" --security-rule
  {"direction":"INGRESS","protocol":"6","source":"$NODE_NSG","sourceType":"NETWORK_SECURITY_GROUP","tcpOptions":{"destinationPortRange":{"min":12250,"max":12250}},"description":"workers to control plane"},
  {"direction":"INGRESS","protocol":"1","source":"$NODE_NSG","sourceType":"NETWORK_SECURITY_GROUP","icmpOptions":{"type":3,"code":4},"description":"path MTU from workers"},
  {"direction":"INGRESS","protocol":"6","source":"$BASTION_SUBNET_CIDR","sourceType":"CIDR_BLOCK","tcpOptions":{"destinationPortRange":{"min":6443,"max":6443}},"description":"kubectl from amitdemografana subnet"},
+ {"direction":"INGRESS","protocol":"6","source":"10.0.1.0/24","sourceType":"CIDR_BLOCK","tcpOptions":{"destinationPortRange":{"min":6443,"max":6443}},"description":"kubectl from cluster subnet (e.g. amit-cicd-compute, which has ghcr.io egress for helm)"},
  {"direction":"EGRESS","protocol":"6","destination":"$NODE_NSG","destinationType":"NETWORK_SECURITY_GROUP","description":"control plane to workers (all TCP incl 10250)"},
  {"direction":"EGRESS","protocol":"1","destination":"$NODE_NSG","destinationType":"NETWORK_SECURITY_GROUP","icmpOptions":{"type":3,"code":4},"description":"path MTU to workers"},
  {"direction":"EGRESS","protocol":"6","destination":"$OSN_DEST","destinationType":"SERVICE_CIDR_BLOCK","tcpOptions":{"destinationPortRange":{"min":443,"max":443}},"description":"control plane to OCI services via SGW"}
