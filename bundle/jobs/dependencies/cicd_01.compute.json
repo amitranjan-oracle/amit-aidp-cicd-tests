@@ -20,7 +20,7 @@
       "memoryInGBs" : 32
     },
     "minWorkerCount" : 1,
-    "maxWorkerCount" : 1
+    "maxWorkerCount" : 2
   },
   "clusterRuntimeConfig" : {
     "type" : "SPARK",
@@ -30,5 +30,5 @@
     "sparkEnvVariables" : { }
   },
   "loggingConfig" : null,
-  "autoTerminationMinutes" : 15
+  "autoTerminationMinutes" : 10
 }
