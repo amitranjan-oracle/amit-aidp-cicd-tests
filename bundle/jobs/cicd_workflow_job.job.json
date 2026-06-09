@@ -3,7 +3,7 @@
   "name" : "cicd_workflow_job",
   "description" : "",
   "schedule" : {
-    "quartzCronExpression" : "0 0 9 * * ?",
+    "quartzCronExpression" : "0 0 10 * * ?",
     "timezoneId" : "UTC",
     "pauseStatus" : null
   },
@@ -24,7 +24,7 @@
     "maxRetries" : 0,
     "minRetryIntervalMillis" : null,
     "isRetryOnTimeout" : null,
-    "notebookPath" : "/Workspace/cicd_test_01/amit-aidp-cicd-tests/src/set_parameter.ipynb",
+    "notebookPath" : "/Workspace/cicd_test_02/amit-aidp-cicd-tests/src/set_parameter.ipynb",
     "source" : null,
     "gitConfig" : null,
     "cluster" : {
@@ -45,7 +45,7 @@
     "maxRetries" : 0,
     "minRetryIntervalMillis" : null,
     "isRetryOnTimeout" : null,
-    "notebookPath" : "/Workspace/cicd_test_01/amit-aidp-cicd-tests/src/print_parameter.ipynb",
+    "notebookPath" : "/Workspace/cicd_test_02/amit-aidp-cicd-tests/src/print_parameter.ipynb",
     "source" : null,
     "gitConfig" : null,
     "cluster" : {

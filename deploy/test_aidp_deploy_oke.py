@@ -354,21 +354,21 @@ class BundleDeploy(unittest.TestCase):
         os.environ.pop("AIDP_FOLDER_PATH", None)
         client, cfg = _client()
         cfg["git"]["repository_url"] = "https://github.com/x/repo.git"
-        cfg["git"]["parent_dir"] = "/Workspace/cicd_test_01"
+        cfg["git"]["parent_dir"] = "/Workspace/cicd_test_02"
         cfg["git"]["bundle_path"] = "bundle"
         client.offline = False
         seen = []
         client.deploy_bundle = lambda p: seen.append(p)
         A.phase3_bundle(client, cfg)
         # <parent_dir>/<repo>/<bundle_path>
-        self.assertEqual(seen, ["/Workspace/cicd_test_01/repo/bundle"])
+        self.assertEqual(seen, ["/Workspace/cicd_test_02/repo/bundle"])
 
 
 class Phase2StaleAssociationGuard(unittest.TestCase):
     def _client_for_phase2(self):
         client, cfg = _client()
         cfg["git"]["repository_url"] = "https://github.com/x/repo.git"
-        cfg["git"]["parent_dir"] = "/Workspace/cicd_test_01"
+        cfg["git"]["parent_dir"] = "/Workspace/cicd_test_02"
         cfg["git"]["branch"] = "main"
         client.offline = False
         client.git_folder_metadata = lambda fp: {"isAssociated": True, "repoKey": "R"}

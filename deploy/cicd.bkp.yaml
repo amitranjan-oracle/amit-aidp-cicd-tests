@@ -13,7 +13,7 @@ git:
   credential_name: cicd-git-account
   credential_secret_id: ocid1.vaultsecret.oc1.iad.amaaaaaaai22xpqatzdboqsmngy72nhogsg32okj63o6h2ex2mwahvzfxqsq   # OCI Vault secret holding the GitHub PAT
   credential_username: amitranjan-oracle
-  parent_dir: /Workspace/cicd_test_01   # folder path derived: parent_dir + repo name (AIDP_FOLDER_PATH env overrides per-runner)
+  parent_dir: /Workspace/cicd_test_02   # folder path derived: parent_dir + repo name (AIDP_FOLDER_PATH env overrides per-runner)
 
 compute:
   spec_file: specs/cicd_01.cluster.json          # cluster name = the spec's displayName
