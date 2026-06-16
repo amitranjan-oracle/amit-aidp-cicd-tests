@@ -22,6 +22,13 @@ Companion script: **`aidp_deploy.py`** (in this directory).
 > accurate reference for the underlying **API contracts** (git pull, deploy
 > bundle, async polling, bundle layout); the env-var example in §5 reflects an
 > earlier standalone version.
+>
+> **Scheduled-execution identity:** a deployed workflow that runs on a schedule needs a
+> `runAs` service-account credential, or its runtime cluster access is RBAC-denied (the
+> deploy-time instance principal has no IAM user). See
+> [`workflow-runas-service-account.md`](workflow-runas-service-account.md) for how to
+> register the credential, retrieve the `runAs` key, and the self-registration /
+> instance-principal limitations.
 
 ---
 
