@@ -9,6 +9,10 @@ deploy/cicd.yaml and:
            bound to the running principal's credential (re-associate if not)
   Phase 3  deploy the AIDP bundle at git.bundle_path — which creates/updates the
            bundle's own compute + workflow
+  Phase 4  ensure each deployed job's runAs matches its bundle job json. AIDP's
+           job CREATE drops runAs (only UPDATE persists it), so a *fresh* bundle
+           deploy leaves runAs=null and a scheduled job then fails; re-apply it
+           here via UpdateJob.
 Only oci + requests + yaml + stdlib. Python 3.9 compatible.
 """
 
@@ -210,6 +214,14 @@ class AidpClient:
         self.verify_tls = bool(cfg.get("options", {}).get("verify_tls", True))
         self.poll_timeout = int(cfg.get("options", {}).get("poll_timeout_secs", 600))
         self.poll_interval = int(cfg.get("options", {}).get("poll_interval_secs", 5))
+        # Phase 4 re-applies runAs via UpdateJob (CREATE drops it). Setting runAs
+        # needs ADMIN on the job; the creator normally has it immediately, but we
+        # briefly retry a transient 404 NotAuthorizedOrNotFound ("Permission Type:
+        # ADMIN") in case the per-job admin grant ever propagates asynchronously.
+        # NOTE: a 404 here can ALSO mean runAs is not a valid credential KEY (a
+        # display name is rejected the same way) — that will NOT clear with retries.
+        self.runas_grant_timeout = int(
+            cfg.get("options", {}).get("runas_grant_timeout_secs", 120))
         self.dry_run = dry_run
         self.offline = signer is None   # no principal -> validate-only (off-box dry-run)
 
@@ -512,6 +524,93 @@ class AidpClient:
         self._wait_if_async(resp)
         log.info("deployed bundle %s", bundle_path)
 
+    # ---- Phase 4: ensure job runAs (workaround for CREATE dropping runAs) ----
+    def ensure_jobs_run_as(self, cfg: Dict[str, Any], local_bundle_dir: str) -> None:
+        """For each bundle job json that sets runAs, ensure the deployed job's
+        runAs matches it.
+
+        AIDP's job CREATE silently drops runAs (only UPDATE persists it — see
+        JobModelConverter.getJobFromCreateDto), so a *fresh* bundle deploy leaves
+        the job at runAs=null and its scheduled runs fail. We re-apply it via
+        UpdateJob. Deployed jobs are namespaced `bundle_<name>_<uuid>`; match by
+        that prefix against the json `name`."""
+        import glob
+        import os
+        if self.dry_run:
+            log.info("[dry-run] would ensure job runAs from %s/jobs/*.job.json",
+                     local_bundle_dir)
+            return
+        job_dir = os.path.join(local_bundle_dir, "jobs")
+        files = sorted(glob.glob(os.path.join(job_dir, "*.job.json")))
+        if not files:
+            log.warning("Phase 4: no job jsons found under %s — skipping", job_dir)
+            return
+        desired: Dict[str, str] = {}
+        for jf in files:
+            with open(jf) as f:
+                jd = json.load(f)
+            name, run_as = jd.get("name"), jd.get("runAs")
+            if name and run_as:
+                desired[name] = run_as
+            elif name:
+                log.info("Phase 4: job %r has no runAs in its json — nothing to enforce", name)
+        if not desired:
+            return
+        all_jobs = self.list_all(self.ws_url("jobs"))
+        for name, run_as in desired.items():
+            prefix = "bundle_" + name + "_"
+            matches = [j for j in all_jobs
+                       if (j.get("name") or "").startswith(prefix) or j.get("name") == name]
+            if not matches:
+                raise RuntimeError(
+                    "Phase 4: no deployed job found for bundle job {!r} (looked for "
+                    "name {!r} or prefix {!r}) — did the bundle deploy succeed?".format(
+                        name, name, prefix))
+            if len(matches) > 1:
+                log.warning("Phase 4: %d deployed jobs match %r; applying runAs to all",
+                            len(matches), name)
+            for j in matches:
+                self._ensure_job_run_as(j["key"], run_as)
+
+    def _ensure_job_run_as(self, job_key: str, run_as: str) -> None:
+        """Set *job_key*'s runAs to *run_as* (if it differs) via a full-replace
+        UpdateJob. Setting runAs needs ADMIN on the job; briefly retry a transient
+        404 NotAuthorizedOrNotFound in case the creator's admin grant propagates
+        asynchronously. *run_as* must be a credential KEY (UUID) — a display name
+        404s the same way and will NOT clear with retries (see Phase 4 ticket)."""
+        current = self.request_ok("GET", self.ws_url("jobs", job_key)).json()
+        if current.get("runAs") == run_as:
+            log.info("Phase 4: job %s runAs already %r", job_key, run_as)
+            return
+        log.info("Phase 4: job %s runAs=%r -> setting %r (bundle CREATE dropped it)",
+                 job_key, current.get("runAs"), run_as)
+        read_only = ("key", "createdBy", "createdByName", "updatedBy",
+                     "updatedByName", "timeCreated", "timeUpdated")
+        body = {k: v for k, v in current.items() if k not in read_only}
+        body["runAs"] = run_as
+        deadline = time.time() + self.runas_grant_timeout
+        delay = 5.0
+        while True:
+            resp = self.request("PUT", self.ws_url("jobs", job_key), body=body)
+            if resp.status_code in (200, 201, 202, 204):
+                self._wait_if_async(resp)
+                log.info("Phase 4: job %s runAs set to %r", job_key, run_as)
+                return
+            txt = resp.text or ""
+            transient = (resp.status_code == 404
+                         and "NotAuthorizedOrNotFound" in txt and "ADMIN" in txt)
+            remaining = deadline - time.time()
+            if not transient or remaining <= 0:
+                raise RuntimeError(
+                    "Phase 4: update job {} runAs -> HTTP {}: {} (opc-request-id={})".format(
+                        job_key, resp.status_code, txt, resp.headers.get("opc-request-id")))
+            wait = min(delay, remaining)
+            log.info("Phase 4: job %s update got 404 ADMIN (admin grant not yet "
+                     "propagated, or runAs is not a valid credential key); retrying "
+                     "in %.0fs (%.0fs left)", job_key, wait, remaining)
+            time.sleep(wait)
+            delay = min(delay * 1.5, 30)
+
 
 def phase0_credential(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     log.info("== Phase 0: ensure git credential ==")
@@ -573,6 +672,23 @@ def phase3_bundle(client: "AidpClient", cfg: Dict[str, Any]) -> None:
     client.deploy_bundle(bundle_path)
 
 
+def phase4_job_runas(client: "AidpClient", cfg: Dict[str, Any], config_path: str) -> None:
+    log.info("== Phase 4: ensure job runAs ==")
+    if client.offline:
+        log.info("[offline dry-run] would ensure deployed jobs' runAs from bundle job jsons")
+        return
+    import os
+    # The bundle's job jsons live in the local repo checkout (the runner's
+    # workspace) at <repo>/<git.bundle_path>/jobs/*.job.json. Derive the repo root
+    # from the config file's location (deploy/cicd.yaml -> repo root), overridable
+    # via AIDP_BUNDLE_LOCAL_DIR.
+    local_dir = os.environ.get("AIDP_BUNDLE_LOCAL_DIR")
+    if not local_dir:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(config_path)))
+        local_dir = os.path.join(repo_root, cfg["git"]["bundle_path"].strip("/"))
+    client.ensure_jobs_run_as(cfg, local_dir)
+
+
 def _build_signer_with_timeout(timeout_secs: float, method: Optional[str] = None):
     """Call build_signer(method) in a daemon thread; return (signer, None) on
     success or (None, exc_str) if it raises or times out within *timeout_secs*."""
@@ -596,7 +712,8 @@ def _build_signer_with_timeout(timeout_secs: float, method: Optional[str] = None
     return None, val
 
 
-def run(cfg: Dict[str, Any], dry_run: bool, runner: str = "vm") -> None:
+def run(cfg: Dict[str, Any], dry_run: bool, runner: str = "vm",
+        config_path: str = "") -> None:
     # --runner selects ONLY the AIDP signer (RUNNER_AUTH). argparse restricts the
     # value to the map keys, so a missing key is a programming error — fail loud.
     method = RUNNER_AUTH[runner]
@@ -621,6 +738,7 @@ def run(cfg: Dict[str, Any], dry_run: bool, runner: str = "vm") -> None:
     parent_was_absent = phase1_directory(client, cfg)
     phase2_git_folder(client, cfg, parent_was_absent)
     phase3_bundle(client, cfg)
+    phase4_job_runas(client, cfg, config_path)
     log.info("== Done ==")
 
 
@@ -638,7 +756,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg = load_config(args.config)
     if args.dry_run:
         log.info("DRY RUN — no mutations will be made.")
-    run(cfg, dry_run=args.dry_run, runner=args.runner)
+    run(cfg, dry_run=args.dry_run, runner=args.runner, config_path=args.config)
     return 0
 
 
